@@ -14,6 +14,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import hudson.PluginManager;
+import jenkins.util.SystemProperties;
 import hudson.util.DirScanner;
 import hudson.util.FileVisitor;
 import hudson.util.Service;
@@ -51,10 +52,10 @@ public class InitStrategy {
         getBundledPluginsFromProperty(r);
 
         // similarly, we prefer *.jpi over *.hpi
-        listPluginFiles(pm, ".hpi", r); // plugin jar file (for backward compatibility)
-        listPluginFiles(pm, ".jpi", r); // plugin jar file
-        listPluginFiles(pm, ".hpl", r); // linked plugin. for debugging. (for backward compatibility)
         listPluginFiles(pm, ".jpl", r); // linked plugin. for debugging.
+        listPluginFiles(pm, ".hpl", r); // linked plugin. for debugging. (for backward compatibility)
+        listPluginFiles(pm, ".jpi", r); // plugin jar file
+        listPluginFiles(pm, ".hpi", r); // plugin jar file (for backward compatibility)
 
         return r;
     }
@@ -74,7 +75,7 @@ public class InitStrategy {
      * TODO: maven-hpi-plugin should inject its own InitStrategy instead of having this in the core.
      */
     protected void getBundledPluginsFromProperty(final List<File> r) {
-        String hplProperty = System.getProperty("hudson.bundled.plugins");
+        String hplProperty = SystemProperties.getString("hudson.bundled.plugins");
         if (hplProperty != null) {
             for (String hplLocation : hplProperty.split(",")) {
                 File hpl = new File(hplLocation.trim());

@@ -26,7 +26,7 @@ package hudson.diagnosis;
 import hudson.Extension;
 import jenkins.model.Jenkins;
 import hudson.model.PeriodicWork;
-import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement;
+import org.jenkinsci.Symbol;
 
 import java.util.logging.Logger;
 
@@ -36,15 +36,13 @@ import java.util.logging.Logger;
  *
  * @author Kohsuke Kawaguchi
  */
-@Extension
+@Extension @Symbol("diskUsageCheck")
 public class HudsonHomeDiskUsageChecker extends PeriodicWork {
     public long getRecurrencePeriod() {
         return HOUR;
     }
 
-    @IgnoreJRERequirement
     protected void doRun() {
-        try {
             long free = Jenkins.getInstance().getRootDir().getUsableSpace();
             long total = Jenkins.getInstance().getRootDir().getTotalSpace();
             if(free<=0 || total<=0) {
@@ -61,20 +59,15 @@ public class HudsonHomeDiskUsageChecker extends PeriodicWork {
             // it's AND and not OR so that small Hudson home won't get a warning,
             // and similarly, if you have a 1TB disk, you don't get a warning when you still have 100GB to go.
             HudsonHomeDiskUsageMonitor.get().activated = (total/free>10 && free< FREE_SPACE_THRESHOLD);
-        } catch (LinkageError _) {
-            // pre Mustang
-            LOGGER.info("Not on JDK6. Cannot monitor JENKINS_HOME disk usage");
-            cancel();
-        }
     }
 
     private static final Logger LOGGER = Logger.getLogger(HudsonHomeDiskUsageChecker.class.getName());
 
     /**
-     * Gets the minimum amount of space to check for, with a default of 1GB
+     * Gets the minimum amount of space to check for, with a default of 10GB
      */
     public static long FREE_SPACE_THRESHOLD = Long.getLong(
             HudsonHomeDiskUsageChecker.class.getName() + ".freeSpaceThreshold",
-            1024L*1024*1024);
+            1024L*1024*1024*10);
 
 }

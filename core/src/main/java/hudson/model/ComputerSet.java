@@ -28,14 +28,19 @@ import hudson.DescriptorExtensionList;
 import hudson.Extension;
 import hudson.Util;
 import hudson.XmlFile;
+import hudson.init.Initializer;
 import hudson.model.Descriptor.FormException;
 import hudson.model.listeners.SaveableListener;
 import hudson.node_monitors.NodeMonitor;
 import hudson.slaves.NodeDescriptor;
+import hudson.triggers.SafeTimerTask;
 import hudson.util.DescribableList;
 import hudson.util.FormApply;
 import hudson.util.FormValidation;
 import jenkins.model.Jenkins;
+import jenkins.model.ModelObjectWithChildren;
+import jenkins.model.ModelObjectWithContextMenu.ContextMenu;
+import jenkins.util.Timer;
 import org.kohsuke.stapler.HttpResponse;
 import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest;
@@ -44,8 +49,8 @@ import org.kohsuke.stapler.export.Exported;
 import org.kohsuke.stapler.export.ExportedBean;
 import org.kohsuke.stapler.interceptor.RequirePOST;
 
+import javax.annotation.Nonnull;
 import javax.servlet.ServletException;
-import static javax.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
 import java.io.File;
 import java.io.IOException;
 import java.util.AbstractList;
@@ -53,9 +58,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.sf.json.JSONObject;
+
+import static hudson.init.InitMilestone.JOB_LOADED;
 
 /**
  * Serves as the top of {@link Computer}s in the URL hierarchy.
@@ -65,7 +73,7 @@ import net.sf.json.JSONObject;
  * @author Kohsuke Kawaguchi
  */
 @ExportedBean
-public final class ComputerSet extends AbstractModelObject implements Describable<ComputerSet> {
+public final class ComputerSet extends AbstractModelObject implements Describable<ComputerSet>, ModelObjectWithChildren {
     /**
      * This is the owner that persists {@link #monitors}.
      */
@@ -88,6 +96,7 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
      * @deprecated as of 1.301
      *      Use {@link #getMonitors()}.
      */
+    @Deprecated
     public static List<NodeMonitor> get_monitors() {
         return monitors.toList();
     }
@@ -95,6 +104,14 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
     @Exported(name="computer",inline=true)
     public Computer[] get_all() {
         return Jenkins.getInstance().getComputers();
+    }
+
+    public ContextMenu doChildrenContextMenu(StaplerRequest request, StaplerResponse response) throws Exception {
+        ContextMenu m = new ContextMenu();
+        for (Computer c : get_all()) {
+            m.add(c);
+        }
+        return m;
     }
 
     /**
@@ -121,7 +138,7 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
     }
 
     /**
-     * Gets all the slave names.
+     * Gets all the agent names.
      */
     public List<String> get_slaveNames() {
         return new AbstractList<String>() {
@@ -184,6 +201,7 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
         return Jenkins.getInstance().getComputer(token);
     }
 
+    @RequirePOST
     public void do_launchAll(StaplerRequest req, StaplerResponse rsp) throws IOException {
         Jenkins.getInstance().checkPermission(Jenkins.ADMINISTER);
 
@@ -199,19 +217,24 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
      *
      * TODO: ajax on the client side to wait until the update completion might be nice.
      */
+    @RequirePOST
     public void doUpdateNow( StaplerRequest req, StaplerResponse rsp ) throws IOException, ServletException {
         Jenkins.getInstance().checkPermission(Jenkins.ADMINISTER);
         
         for (NodeMonitor nodeMonitor : NodeMonitor.getAll()) {
             Thread t = nodeMonitor.triggerUpdate();
-            t.setName(nodeMonitor.getColumnCaption());
+            String columnCaption = nodeMonitor.getColumnCaption();
+            if (columnCaption != null) {
+                t.setName(columnCaption);
+            }
         }
         rsp.forwardToPreviousPage(req);
     }
 
     /**
-     * First check point in creating a new slave.
+     * First check point in creating a new agent.
      */
+    @RequirePOST
     public synchronized void doCreateItem( StaplerRequest req, StaplerResponse rsp,
                                            @QueryParameter String name, @QueryParameter String mode,
                                            @QueryParameter String from ) throws IOException, ServletException {
@@ -223,12 +246,11 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
 
             Node src = app.getNode(from);
             if(src==null) {
-                rsp.setStatus(SC_BAD_REQUEST);
-                if(Util.fixEmpty(from)==null)
-                    sendError(Messages.ComputerSet_SpecifySlaveToCopy(),req,rsp);
-                else
-                    sendError(Messages.ComputerSet_NoSuchSlave(from),req,rsp);
-                return;
+                if (Util.fixEmpty(from) == null) {
+                    throw new Failure(Messages.ComputerSet_SpecifySlaveToCopy());
+                } else {
+                    throw new Failure(Messages.ComputerSet_NoSuchSlave(from));
+                }
             }
 
             // copy through XStream
@@ -247,19 +269,22 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
             rsp.sendRedirect2(result.getNodeName()+"/configure");
         } else {
             // proceed to step 2
-            if(mode==null) {
-                rsp.sendError(SC_BAD_REQUEST);
-                return;
+            if (mode == null) {
+                throw new Failure("No mode given");
             }
 
             NodeDescriptor d = NodeDescriptor.all().findByName(mode);
+            if (d == null) {
+                throw new Failure("No node type ‘" + mode + "’ is known");
+            }
             d.handleNewNodePage(this,name,req,rsp);
         }
     }
 
     /**
-     * Really creates a new slave.
+     * Really creates a new agent.
      */
+    @RequirePOST
     public synchronized void doDoCreateItem( StaplerRequest req, StaplerResponse rsp,
                                            @QueryParameter String name,
                                            @QueryParameter String type ) throws IOException, ServletException, FormException {
@@ -271,15 +296,16 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
         JSONObject formData = req.getSubmittedForm();
         formData.put("name", fixedName);
         
+        // TODO type is probably NodeDescriptor.id but confirm
         Node result = NodeDescriptor.all().find(type).newInstance(req, formData);
         app.addNode(result);
 
-        // take the user back to the slave list top page
+        // take the user back to the agent list top page
         rsp.sendRedirect2(".");
     }
 
     /**
-     * Makes sure that the given name is good as a slave name.
+     * Makes sure that the given name is good as an agent name.
      * @return trimmed name if valid; throws ParseException if not
      */
     public String checkName(String name) throws Failure {
@@ -297,7 +323,7 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
     }
 
     /**
-     * Makes sure that the given name is good as a slave name.
+     * Makes sure that the given name is good as an agent name.
      */
     public FormValidation doCheckName(@QueryParameter String value) throws IOException, ServletException {
         Jenkins.getInstance().checkPermission(Computer.CREATE);
@@ -359,11 +385,6 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
 
     @Extension
     public static class DescriptorImpl extends Descriptor<ComputerSet> {
-        @Override
-        public String getDisplayName() {
-            return "";
-        }
-
         /**
          * Auto-completion for the "copy from" field in the new job page.
          */
@@ -383,6 +404,31 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
      * Just to force the execution of the static initializer.
      */
     public static void initialize() {}
+
+    @Initializer(after= JOB_LOADED)
+    public static void init() {
+        // start monitoring nodes, although there's no hurry.
+        Timer.get().schedule(new SafeTimerTask() {
+            public void doRun() {
+                ComputerSet.initialize();
+            }
+        }, 10, TimeUnit.SECONDS);
+    }
+
+    /**
+     * @return The list of strings of computer names (excluding master)
+     * @since 2.14
+     */
+    @Nonnull
+    public static List<String> getComputerNames() {
+        final ArrayList<String> names = new ArrayList<String>();
+        for (Computer c : Jenkins.getInstance().getComputers()) {
+            if (!c.getName().isEmpty()) {
+                names.add(c.getName());
+            }
+        }
+        return names;
+    }
 
     private static final Logger LOGGER = Logger.getLogger(ComputerSet.class.getName());
 
@@ -416,8 +462,8 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
                         r.add(i);
                 }
             monitors.replaceBy(r.toList());
-        } catch (IOException e) {
-            LOGGER.log(Level.WARNING, "Failed to instanciate NodeMonitors",e);
+        } catch (Throwable x) {
+            LOGGER.log(Level.WARNING, "Failed to instantiate NodeMonitors", x);
         }
     }
 
@@ -426,10 +472,8 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
             NodeMonitor nm = d.clazz.newInstance();
             nm.setIgnored(ignored);
             return nm;
-        } catch (InstantiationException e) {
-            LOGGER.log(Level.SEVERE, "Failed to instanciate "+d.clazz,e);
-        } catch (IllegalAccessException e) {
-            LOGGER.log(Level.SEVERE, "Failed to instanciate "+d.clazz,e);
+        } catch (InstantiationException | IllegalAccessException e) {
+            LOGGER.log(Level.SEVERE, "Failed to instantiate "+d.clazz,e);
         }
         return null;
     }

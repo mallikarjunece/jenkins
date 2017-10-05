@@ -28,9 +28,7 @@ package hudson.console;
 import com.trilead.ssh2.crypto.Base64;
 import jenkins.model.Jenkins;
 import hudson.remoting.ObjectInputStreamEx;
-import hudson.util.IOException2;
-import hudson.util.Secret;
-import hudson.util.TimeUnit2;
+import java.util.concurrent.TimeUnit;
 import jenkins.security.CryptoConfidentialKey;
 import org.apache.commons.io.output.ByteArrayOutputStream;
 import org.kohsuke.stapler.Stapler;
@@ -50,9 +48,8 @@ import java.io.ObjectOutputStream;
 import java.io.OutputStream;
 import java.io.Writer;
 import java.nio.charset.Charset;
-import java.security.GeneralSecurityException;
-import java.util.zip.GZIPInputStream;
-import java.util.zip.GZIPOutputStream;
+import com.jcraft.jzlib.GZIPInputStream;
+import com.jcraft.jzlib.GZIPOutputStream;
 
 import static java.lang.Math.abs;
 
@@ -126,7 +123,7 @@ public class AnnotatedLargeText<T> extends LargeText {
                         Jenkins.getInstance().pluginManager.uberClassLoader);
                 try {
                     long timestamp = ois.readLong();
-                    if (TimeUnit2.HOURS.toMillis(1) > abs(System.currentTimeMillis()-timestamp))
+                    if (TimeUnit.HOURS.toMillis(1) > abs(System.currentTimeMillis()-timestamp))
                         // don't deserialize something too old to prevent a replay attack
                         return (ConsoleAnnotator)ois.readObject();
                 } finally {
@@ -134,7 +131,7 @@ public class AnnotatedLargeText<T> extends LargeText {
                 }
             }
         } catch (ClassNotFoundException e) {
-            throw new IOException2(e);
+            throw new IOException(e);
         }
         // start from scratch
         return ConsoleAnnotator.initial(context==null ? null : context.getClass());
@@ -148,9 +145,21 @@ public class AnnotatedLargeText<T> extends LargeText {
             return super.writeLogTo(start,w);
     }
 
+    /**
+     * Strips annotations using a {@link PlainTextConsoleOutputStream}.
+     * {@inheritDoc}
+     */
     @Override
     public long writeLogTo(long start, OutputStream out) throws IOException {
         return super.writeLogTo(start, new PlainTextConsoleOutputStream(out));
+    }
+
+    /**
+     * Calls {@link LargeText#writeLogTo(long, OutputStream)} without stripping annotations as {@link #writeLogTo(long, OutputStream)} would.
+     * @since 1.577
+     */
+    public long writeRawLogTo(long start, OutputStream out) throws IOException {
+        return super.writeLogTo(start, out);
     }
 
     public long writeHtmlTo(long start, Writer w) throws IOException {

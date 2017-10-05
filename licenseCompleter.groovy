@@ -1,5 +1,5 @@
 /*
-    This script auguments the missing license information in our dependencies.
+    This script augments the missing license information in our dependencies.
 */
 complete {
     // license constants
@@ -8,7 +8,8 @@ complete {
     def lgpl = license("LGPL 2.1","http://www.gnu.org/licenses/old-licenses/lgpl-2.1.html")
     def mitLicense = license("MIT License","http://www.opensource.org/licenses/mit-license.php")
     def bsdLicense = license("BSD License","http://opensource.org/licenses/BSD-2-Clause")
-    def jenkinsLicense = license("MIT License","http://jenkins-ci.org/mit-license")
+    def jenkinsLicense = license("MIT License","https://jenkins.io/mit-license")
+    def ccby = license("Creative Commons Attribution License","http://creativecommons.org/licenses/by/2.5")
 
 
     match("asm:*") {
@@ -31,6 +32,13 @@ complete {
         if (dependency.licenses.isEmpty())
             dependency.licenses=[cddl]
     }
+    
+/* TODO
+    // according to JSR-250 1.0-20050927.133100 POM, it came from JAX-WS, which is under CDDL.
+    match("javax.annotation:jsr250-api") {
+        rewriteLicense([], cddl)
+    }
+*/
 
     match("antlr:*") {
         rewriteLicense([], license("BSD License","http://www.antlr.org/license.html"))
@@ -44,7 +52,7 @@ complete {
         rewriteLicense([],license("BSD License","http://dom4j.sourceforge.net/dom4j-1.6.1/license.html"))
     }
 
-    match(["org.codehaus.groovy:*","org.jenkins-ci.groovy:*"]) {
+    match(["org.jenkins-ci.groovy:*"]) {
         // see http://groovy.codehaus.org/License+Information
         // see http://jmdns.sourceforge.net/license.html
         rewriteLicense([],apacheLicense)
@@ -61,18 +69,8 @@ complete {
 
     // these are our own modules that have license in the trunk but not in these released versions
     // as we upgrade them, we should just pick up the license info from POM
-    match(["org.jvnet.hudson:task-reactor","org.jvnet.hudson:annotation-indexer","*:jinterop-wmi","*:maven2.1-interceptor","*:lib-jenkins-maven-embedder"]) {
+    match(["*:maven2.1-interceptor","*:lib-jenkins-maven-embedder"]) {
         rewriteLicense([],jenkinsLicense)
-    }
-
-    match("*:jna") {
-        rewriteLicense([],lgpl)
-    }
-
-    match(["org.jvnet.localizer:localizer"]) {
-        // see http://java.net/projects/localizer
-        // see http://java.net/projects/trilead-putty-extension/
-        rewriteLicense([],mitLicense);
     }
 
     match("org.codehaus.plexus:plexus-interactivity-api") {
@@ -88,6 +86,9 @@ complete {
         rewriteLicense([license("CDDL or GPL 2 with Classpath Exception",null)],cddl);
     }
            
+    match("net.jcip:jcip-annotations") {
+        rewriteLicense([],ccby)
+    }
 
     //
     // Choose from multi-licensed modules

@@ -29,7 +29,23 @@ THE SOFTWARE.
     <j:set var="upJob" value="${app.updateCenter.hudsonJob}" />
     <j:choose>
       <j:when test="${upJob.status.success}">
-        ${%UpgradeComplete(ucData.core.version,rootURL)}
+        <j:invokeStatic var="lifecycle" className="hudson.lifecycle.Lifecycle" method="get" />
+        <j:choose>
+          <j:when test="${lifecycle.canRestart()}">
+            ${%UpgradeComplete(ucData.core.version,rootURL)}
+          </j:when>
+          <j:otherwise>
+            ${%UpgradeCompleteRestartNotSupported(ucData.core.version)}
+          </j:otherwise>
+        </j:choose>
+      </j:when>
+      <j:when test="${upJob!=null and upJob.error != null}">
+        <form method="post" action="${rootURL}/updateCenter/upgrade">
+          ${%UpgradeFailed(ucData.core.version,upJob.errorMessage,rootURL+'/updateCenter/')}
+          <j:if test="${ucData.canUpgrade()}">
+            <f:submit value="${%Retry}"/>
+          </j:if>
+        </form>
       </j:when>
       <j:when test="${upJob!=null}">
         ${%UpgradeProgress(ucData.core.version,rootURL+'/updateCenter/')}

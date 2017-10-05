@@ -24,12 +24,13 @@
 package hudson.cli;
 
 import java.util.Collection;
-import java.util.Collections;
+
 import hudson.model.Item;
-import hudson.model.ItemGroup;
+import hudson.model.Items;
 import hudson.model.TopLevelItem;
 import hudson.model.View;
 import hudson.Extension;
+import jenkins.model.ModifiableTopLevelItemGroup;
 import jenkins.model.Jenkins;
 import org.kohsuke.args4j.Argument;
 
@@ -49,7 +50,7 @@ public class ListJobsCommand extends CLICommand {
     public String name;
 
     protected int run() throws Exception {
-        Jenkins h = Jenkins.getInstance();
+        Jenkins h = Jenkins.getActiveInstance();
         final Collection<TopLevelItem> jobs;
 
         // If name is given retrieve jobs for the given view.
@@ -57,21 +58,19 @@ public class ListJobsCommand extends CLICommand {
             View view = h.getView(name);
 
             if (view != null) {
-                jobs = view.getItems();
+                jobs = view.getAllItems();
             }
             // If no view was found, try with an item group.
             else {
                 final Item item = h.getItemByFullName(name);
 
                 // If item group was found use it's jobs.
-                if (item instanceof ItemGroup) {
-                    ItemGroup itemGroup = (ItemGroup) item;
-                    jobs = itemGroup.getItems();
+                if (item instanceof ModifiableTopLevelItemGroup) {
+                    jobs = Items.getAllItems((ModifiableTopLevelItemGroup) item, TopLevelItem.class);
                 }
                 // No view and no item group with the given name found.
                 else {
-                    stderr.println("No view or item group with the given name found");
-                    jobs = Collections.emptyList();
+                    throw new IllegalArgumentException("No view or item group with the given name '" + name + "' found.");
                 }
             }
         }
@@ -82,7 +81,7 @@ public class ListJobsCommand extends CLICommand {
 
         // Print all jobs.
         for (TopLevelItem item : jobs) {
-            stdout.println(item.getDisplayName());
+            stdout.println(item.getName());
         }
 
         return 0;

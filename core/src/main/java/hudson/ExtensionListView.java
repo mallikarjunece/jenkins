@@ -23,8 +23,8 @@
  */
 package hudson;
 
-import jenkins.model.Jenkins;
 import hudson.tasks.UserNameResolver;
+import jenkins.model.Jenkins;
 import hudson.util.CopyOnWriteList;
 
 import java.util.AbstractList;
@@ -142,7 +142,7 @@ public class ExtensionListView {
             }
 
             @Override
-            public T[] toArray(T[] array) {
+            public <T> T[] toArray(T[] array) {
                 return storage().toArray(array);
             }
 

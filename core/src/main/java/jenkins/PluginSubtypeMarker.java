@@ -23,15 +23,14 @@
  */
 package jenkins;
 
+import hudson.Functions;
 import hudson.Plugin;
-import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement;
 import org.kohsuke.MetaInfServices;
 
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.Processor;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
-import javax.annotation.processing.SupportedSourceVersion;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
@@ -55,10 +54,8 @@ import java.util.Set;
  * @author Kohsuke Kawaguchi
  * @since 1.420
  */
-@SupportedSourceVersion(SourceVersion.RELEASE_6)
 @SupportedAnnotationTypes("*")
 @MetaInfServices(Processor.class)
-@IgnoreJRERequirement
 @SuppressWarnings({"Since15"})
 public class PluginSubtypeMarker extends AbstractProcessor {
     @Override
@@ -73,14 +70,17 @@ public class PluginSubtypeMarker extends AbstractProcessor {
                             try {
                                 write(e);
                             } catch (IOException x) {
-                                StringWriter sw = new StringWriter();
-                                x.printStackTrace(new PrintWriter(sw));
-                                processingEnv.getMessager().printMessage(Kind.ERROR,sw.toString(),e);
+                                processingEnv.getMessager().printMessage(Kind.ERROR, Functions.printThrowable(x), e);
                             }
                         }
                     }
 
                     return super.visitType(e, aVoid);
+                }
+
+                @Override
+                public Void visitUnknown(Element e, Void aVoid) {
+                    return DEFAULT_VALUE;
                 }
             };
 
@@ -102,14 +102,16 @@ public class PluginSubtypeMarker extends AbstractProcessor {
         }
     }
 
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+        return SourceVersion.latest();
+    }
+
     private void write(TypeElement c) throws IOException {
         FileObject f = processingEnv.getFiler().createResource(StandardLocation.CLASS_OUTPUT,
                 "", "META-INF/services/hudson.Plugin");
-        Writer w = new OutputStreamWriter(f.openOutputStream(),"UTF-8");
-        try {
+        try (Writer w = new OutputStreamWriter(f.openOutputStream(), "UTF-8")) {
             w.write(c.getQualifiedName().toString());
-        } finally {
-            w.close();
         }
     }
 

@@ -23,13 +23,15 @@
  */
 package hudson.util.io;
 
-import hudson.util.IOException2;
-
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.StandardOpenOption;
 
 /**
  * {@link OutputStream} that writes to a file.
@@ -39,8 +41,9 @@ import java.io.OutputStream;
  * and then keep writing.
  *
  * @author Kohsuke Kawaguchi
+ * @deprecated due to risk for file leak. Prefer {@link RewindableFileOutputStream}
  */
-public class ReopenableFileOutputStream extends OutputStream {
+@Deprecated public class ReopenableFileOutputStream extends OutputStream {
     protected final File out;
 
     private OutputStream current;
@@ -53,9 +56,10 @@ public class ReopenableFileOutputStream extends OutputStream {
     private synchronized OutputStream current() throws IOException {
         if (current==null)
             try {
-                current = new FileOutputStream(out,appendOnNextOpen);
-            } catch (FileNotFoundException e) {
-                throw new IOException2("Failed to open "+out,e);
+                current = Files.newOutputStream(out.toPath(), StandardOpenOption.CREATE,
+                        appendOnNextOpen ? StandardOpenOption.APPEND : StandardOpenOption.TRUNCATE_EXISTING);
+            } catch (FileNotFoundException | NoSuchFileException | InvalidPathException e) {
+                throw new IOException("Failed to open "+out,e);
             }
         return current;
     }

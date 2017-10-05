@@ -23,12 +23,12 @@
  */
 package hudson.util;
 
+import com.thoughtworks.xstream.XStreamException;
 import com.thoughtworks.xstream.converters.ConversionException;
 import com.thoughtworks.xstream.converters.Converter;
 import com.thoughtworks.xstream.converters.MarshallingContext;
 import com.thoughtworks.xstream.converters.SingleValueConverter;
 import com.thoughtworks.xstream.converters.UnmarshallingContext;
-import com.thoughtworks.xstream.converters.reflection.MissingFieldException;
 import com.thoughtworks.xstream.converters.reflection.ObjectAccessException;
 import com.thoughtworks.xstream.converters.reflection.PureJavaReflectionProvider;
 import com.thoughtworks.xstream.converters.reflection.ReflectionConverter;
@@ -38,22 +38,26 @@ import com.thoughtworks.xstream.core.util.Primitives;
 import com.thoughtworks.xstream.io.ExtendedHierarchicalStreamWriterHelper;
 import com.thoughtworks.xstream.io.HierarchicalStreamReader;
 import com.thoughtworks.xstream.io.HierarchicalStreamWriter;
-import com.thoughtworks.xstream.mapper.CannotResolveClassException;
 import com.thoughtworks.xstream.mapper.Mapper;
 import hudson.diagnosis.OldDataMonitor;
 import hudson.model.Saveable;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Set;
-import static java.util.logging.Level.WARNING;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import static java.util.logging.Level.FINE;
 import java.util.logging.Logger;
 import javax.annotation.Nonnull;
+import javax.annotation.concurrent.GuardedBy;
+import jenkins.util.xstream.CriticalXStreamException;
 
 /**
  * Custom {@link ReflectionConverter} that handle errors more gracefully.
@@ -73,6 +77,15 @@ public class RobustReflectionConverter implements Converter {
     protected transient SerializationMethodInvoker serializationMethodInvoker;
     private transient ReflectionProvider pureJavaReflectionProvider;
     private final @Nonnull XStream2.ClassOwnership classOwnership;
+    /** {@code pkg.Clazz#fieldName} */
+    /** There are typically few critical fields around, but we end up looking up in this map a lot.
+        in addition, this map is really only written to during static initialization, so we should use
+        reader writer lock to avoid locking as much as possible.  In addition, to avoid looking up
+        the class name (which requires calling class.getName, which may not be cached, the map is inverted
+        with the fields as the keys.**/
+    private final ReadWriteLock criticalFieldsLock = new ReentrantReadWriteLock();
+    @GuardedBy("criticalFieldsLock")
+    private final Map<String, Set<String>> criticalFields = new HashMap<String, Set<String>>();
 
     public RobustReflectionConverter(Mapper mapper, ReflectionProvider reflectionProvider) {
         this(mapper, reflectionProvider, new XStream2().new PluginClassOwnership());
@@ -83,6 +96,41 @@ public class RobustReflectionConverter implements Converter {
         assert classOwnership != null;
         this.classOwnership = classOwnership;
         serializationMethodInvoker = new SerializationMethodInvoker();
+    }
+
+    void addCriticalField(Class<?> clazz, String field) {
+        // Lock the write lock
+        criticalFieldsLock.writeLock().lock();
+        try {
+            // If the class already exists, then add a new field, otherwise
+            // create the hash map field
+            if (!criticalFields.containsKey(field)) {
+                criticalFields.put(field, new HashSet<String>());
+            }
+            criticalFields.get(field).add(clazz.getName());
+        }
+        finally {
+            // Unlock
+            criticalFieldsLock.writeLock().unlock();
+        }
+    }
+    
+    private boolean hasCriticalField(Class<?> clazz, String field) {
+        // Lock the write lock
+        criticalFieldsLock.readLock().lock();
+        try {
+            Set<String> classesWithField = criticalFields.get(field);
+            if (classesWithField == null) {
+                return false;
+            }
+            if (!classesWithField.contains(clazz.getName())) {
+                return false;
+            }
+            return true;
+        }
+        finally {
+            criticalFieldsLock.readLock().unlock();
+        }
     }
 
     public boolean canConvert(Class type) {
@@ -261,8 +309,16 @@ public class RobustReflectionConverter implements Converter {
         while (reader.hasMoreChildren()) {
             reader.moveDown();
 
+            boolean critical = false;
             try {
                 String fieldName = mapper.realMember(result.getClass(), reader.getNodeName());
+                for (Class<?> concrete = result.getClass(); concrete != null; concrete = concrete.getSuperclass()) {
+                    // Not quite right since a subclass could shadow a field, but probably suffices:
+                    if (hasCriticalField(concrete, fieldName)) {
+                        critical = true;
+                        break;
+                    }
+                }
                 boolean implicitCollectionHasSameName = mapper.getImplicitCollectionDefForFieldName(result.getClass(), reader.getNodeName()) != null;
 
                 Class classDefiningField = determineWhichClassDefinesField(reader);
@@ -293,14 +349,17 @@ public class RobustReflectionConverter implements Converter {
                         implicitCollectionsForCurrentObject = writeValueToImplicitCollection(context, value, implicitCollectionsForCurrentObject, result, fieldName);
                     }
                 }
-            } catch (MissingFieldException e) {
-                LOGGER.log(WARNING,"Skipping a non-existent field "+e.getFieldName(),e);
-                addErrorInContext(context, e);
-            } catch (CannotResolveClassException e) {
-                LOGGER.log(WARNING,"Skipping a non-existent type",e);
+            } catch (CriticalXStreamException e) {
+                throw e;
+            } catch (XStreamException e) {
+                if (critical) {
+                    throw new CriticalXStreamException(e);
+                }
                 addErrorInContext(context, e);
             } catch (LinkageError e) {
-                LOGGER.log(WARNING,"Failed to resolve a type",e);
+                if (critical) {
+                    throw e;
+                }
                 addErrorInContext(context, e);
             }
 
@@ -316,6 +375,7 @@ public class RobustReflectionConverter implements Converter {
     }
 
     public static void addErrorInContext(UnmarshallingContext context, Throwable e) {
+        LOGGER.log(FINE, "Failed to load", e);
         ArrayList<Throwable> list = (ArrayList<Throwable>)context.get("ReadError");
         if (list == null)
             context.put("ReadError", list = new ArrayList<Throwable>());

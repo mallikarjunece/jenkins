@@ -24,7 +24,6 @@
 package hudson.model;
 
 import hudson.ExtensionPoint;
-import hudson.Plugin;
 import hudson.DescriptorExtensionList;
 import hudson.model.Descriptor.FormException;
 import jenkins.model.Jenkins;
@@ -37,7 +36,7 @@ import org.kohsuke.stapler.export.ExportedBean;
  * Extensible property of {@link User}.
  *
  * <p>
- * {@link Plugin}s can extend this to define custom properties
+ * Plugins can extend this to define custom properties
  * for {@link User}s. {@link UserProperty}s show up in the user
  * configuration screen, and they are persisted with the user object.
  *
@@ -45,8 +44,8 @@ import org.kohsuke.stapler.export.ExportedBean;
  * Configuration screen should be defined in <tt>config.jelly</tt>.
  * Within this page, the {@link UserProperty} instance is available
  * as <tt>instance</tt> variable (while <tt>it</tt> refers to {@link User}.
- * See {@link UserSearchProperty.UserProperty}'s <tt>config.jelly</tt> for an example.
- *
+ * See {@link hudson.search.UserSearchProperty}'s <tt>config.jelly</tt> for an example.
+ * <p>A property may also define a {@code summary.jelly} view to show in the main user screen.
  *
  * @author Kohsuke Kawaguchi
  */
@@ -59,7 +58,7 @@ public abstract class UserProperty implements ReconfigurableDescribable<UserProp
      */
     protected transient User user;
 
-    /*package*/ final void setUser(User u) {
+    protected void setUser(User u) {
         this.user = u;
     }
 

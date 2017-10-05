@@ -2,8 +2,6 @@ package jenkins.scm;
 
 import hudson.ExtensionPoint;
 import hudson.Launcher;
-import hudson.matrix.MatrixBuild;
-import hudson.matrix.MatrixRun;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractBuild.AbstractBuildExecution;
 import hudson.model.AbstractDescribableImpl;
@@ -18,18 +16,18 @@ import java.io.File;
 import java.io.IOException;
 
 /**
- * Controls the check out behavior in the matrix project.
+ * Controls the check out behavior in {@link AbstractBuild}.
  * 
  * <p>
- * This extension point can be used to control the check out behaviour in matrix projects. The intended use cases
- * include situations like:
+ * While this can work with any {@link AbstractBuild}, the primary motivation of this extension point
+ * is to control the check out behaviour in matrix projects. The intended use cases include situations like:
  * 
  * <ul>
- *     <li>Check out will only happen once in {@link MatrixBuild}, and its state will be then sent
- *         to {@link MatrixRun}s by other means such as rsync.
- *     <li>{@link MatrixBuild} does no check out of its own, and check out is only done on {@link MatrixRun}s
+ *     <li>Check out will only happen once in {@code MatrixBuild}, and its state will be then sent
+ *         to {@code MatrixRun}s by other means such as rsync.
+ *     <li>{@code MatrixBuild} does no check out of its own, and check out is only done on {@code MatrixRun}s
  * </ul>
- * 
+ *
  * <h2>Hook Semantics</h2>
  * There are currently two hooks defined on this class:
  * 

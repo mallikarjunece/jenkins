@@ -27,9 +27,9 @@ import hudson.Extension;
 import hudson.ExtensionList;
 import hudson.ExtensionPoint;
 import hudson.tasks.BuildStep;
-import jenkins.model.Jenkins;
 
 import java.util.Collection;
+import jenkins.model.TransientActionFactory;
 
 /**
  * Extension point for inserting transient {@link Action}s into {@link AbstractProject}s.
@@ -50,6 +50,7 @@ import java.util.Collection;
  * @author Kohsuke Kawaguchi
  * @since 1.327
  * @see Action
+ * @see TransientActionFactory
  */
 public abstract class TransientProjectActionFactory implements ExtensionPoint {
     /**
@@ -66,6 +67,6 @@ public abstract class TransientProjectActionFactory implements ExtensionPoint {
      * Returns all the registered {@link TransientProjectActionFactory}s.
      */
     public static ExtensionList<TransientProjectActionFactory> all() {
-        return Jenkins.getInstance().getExtensionList(TransientProjectActionFactory.class);
+        return ExtensionList.lookup(TransientProjectActionFactory.class);
     }
 }

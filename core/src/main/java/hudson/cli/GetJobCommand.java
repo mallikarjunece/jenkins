@@ -24,9 +24,7 @@
 package hudson.cli;
 
 import hudson.Extension;
-import hudson.model.AbstractProject;
-import hudson.model.Item;
-import hudson.util.IOUtils;
+import hudson.model.AbstractItem;
 import org.kohsuke.args4j.Argument;
 
 /**
@@ -35,7 +33,7 @@ import org.kohsuke.args4j.Argument;
 @Extension
 public class GetJobCommand extends CLICommand {
     @Argument(metaVar="JOB",usage="Name of the job",required=true)
-    public AbstractProject<?,?> job;
+    public AbstractItem job;
 
     @Override
     public String getShortDescription() {
@@ -43,10 +41,7 @@ public class GetJobCommand extends CLICommand {
     }
 
     protected int run() throws Exception {
-        job.checkPermission(Item.EXTENDED_READ);
-        IOUtils.copy(
-            job.getConfigFile().getFile(),
-            stdout);
+        job.writeConfigDotXml(stdout);
         return 0;
     }
 }

@@ -29,7 +29,7 @@ import hudson.Util;
 import hudson.Extension;
 import hudson.node_monitors.ArchitectureMonitor.DescriptorImpl;
 import hudson.util.Secret;
-import static hudson.util.TimeUnit2.DAYS;
+import static java.util.concurrent.TimeUnit.DAYS;
 
 import jenkins.model.Jenkins;
 import net.sf.json.JSONObject;
@@ -59,7 +59,8 @@ import java.security.interfaces.RSAPublicKey;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.zip.GZIPOutputStream;
+import com.jcraft.jzlib.GZIPOutputStream;
+import jenkins.util.SystemProperties;
 
 /**
  * @author Kohsuke Kawaguchi
@@ -135,6 +136,7 @@ public class UsageStatistics extends PageDecorator {
             if(c.getNode()==j) {
                 n.put("master",true);
                 n.put("jvm-vendor", System.getProperty("java.vm.vendor"));
+                n.put("jvm-name", System.getProperty("java.vm.name"));
                 n.put("jvm-version", System.getProperty("java.version"));
             }
             n.put("executors",c.getNumExecutors());
@@ -155,14 +157,22 @@ public class UsageStatistics extends PageDecorator {
         o.put("plugins",plugins);
 
         JSONObject jobs = new JSONObject();
-        List<TopLevelItem> items = j.getItems();
-        for (TopLevelItemDescriptor d : Items.all()) {
-            int cnt=0;
-            for (TopLevelItem item : items) {
-                if(item.getDescriptor()==d)
-                    cnt++;
+        // capture the descriptors as these should be small compared with the number of items
+        // so we will walk all items only once and we can short-cut the search of descriptors
+        TopLevelItemDescriptor[] descriptors = Items.all().toArray(new TopLevelItemDescriptor[0]);
+        int counts[] = new int[descriptors.length];
+        for (TopLevelItem item: j.allItems(TopLevelItem.class)) {
+            TopLevelItemDescriptor d = item.getDescriptor();
+            for (int i = 0; i < descriptors.length; i++) {
+                if (d == descriptors[i]) {
+                    counts[i]++;
+                    // no point checking any more, we found the match
+                    break;
+                }
             }
-            jobs.put(d.getJsonSafeClassName(),cnt);
+        }
+        for (int i = 0; i < descriptors.length; i++) {
+            jobs.put(descriptors[i].getJsonSafeClassName(), counts[i]);
         }
         o.put("jobs",jobs);
 
@@ -170,9 +180,11 @@ public class UsageStatistics extends PageDecorator {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
             // json -> UTF-8 encode -> gzip -> encrypt -> base64 -> string
-            OutputStreamWriter w = new OutputStreamWriter(new GZIPOutputStream(new CombinedCipherOutputStream(baos,getKey(),"AES")), "UTF-8");
-            o.write(w);
-            w.close();
+            try (OutputStream cipheros = new CombinedCipherOutputStream(baos,getKey(),"AES");
+                 OutputStream zipos = new GZIPOutputStream(cipheros);
+                 OutputStreamWriter w = new OutputStreamWriter(zipos, "UTF-8")) {
+                o.write(w);
+            }
 
             return new String(Base64.encode(baos.toByteArray()));
         } catch (GeneralSecurityException e) {
@@ -192,10 +204,10 @@ public class UsageStatistics extends PageDecorator {
     }
 
     /**
-     * Assymetric cipher is slow and in case of Sun RSA implementation it can only encyrypt the first block.
+     * Asymmetric cipher is slow and in case of Sun RSA implementation it can only encrypt the first block.
      *
      * So first create a symmetric key, then place this key in the beginning of the stream by encrypting it
-     * with the assymetric cipher. The rest of the stream will be encrypted by a symmetric cipher.
+     * with the asymmetric cipher. The rest of the stream will be encrypted by a symmetric cipher.
      */
     public static final class CombinedCipherOutputStream extends FilterOutputStream {
         public CombinedCipherOutputStream(OutputStream out, Cipher asym, String algorithm) throws IOException, GeneralSecurityException {
@@ -267,5 +279,5 @@ public class UsageStatistics extends PageDecorator {
 
     private static final long DAY = DAYS.toMillis(1);
 
-    public static boolean DISABLED = Boolean.getBoolean(UsageStatistics.class.getName()+".disabled");
+    public static boolean DISABLED = SystemProperties.getBoolean(UsageStatistics.class.getName()+".disabled");
 }

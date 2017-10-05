@@ -35,8 +35,8 @@ THE SOFTWARE.
         </st:attribute>
     </st:documentation>
     <st:adjunct includes="lib.layout.progressiveRendering.progressiveRendering"/>
-    <!-- XXX generate an ID so we can use this more than once per page -->
-    <t:progressBar id="status" pos="0" tooltip="${tooltip ?: '%progressMessage'}"/>
-    <j:invoke method="start" on="${handler}"/>
-    <script>progressivelyRender(<st:bind value="${handler}"/>, ${callback});</script>
+    <j:set var="id" value="${h.generateId()}"/>
+    <t:progressBar id="${id}" pos="0" tooltip="${tooltip ?: '%progressMessage'}"/>
+    <st:bind var="proxy" value="${handler}" />
+    <script>progressivelyRender(proxy, ${callback}, '${id}');</script>
 </j:jelly>

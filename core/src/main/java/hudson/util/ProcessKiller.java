@@ -26,8 +26,6 @@ package hudson.util;
 
 import hudson.ExtensionList;
 import hudson.ExtensionPoint;
-import jenkins.model.Jenkins;
-import hudson.util.ProcessTree.OSProcess;
 
 import java.io.IOException;
 import java.io.Serializable;
@@ -40,18 +38,18 @@ import java.io.Serializable;
  * <p>
  * Each implementation of {@link ProcessKiller} is instantiated once on the master.
  * Whenever a process needs to be killed, those implementations are serialized and sent over
- * to the appropriate slave, then the {@link #kill(OSProcess)} method is invoked
+ * to the appropriate agent, then the {@link #kill(ProcessTree.OSProcess)} method is invoked
  * to attempt to kill the process.
  *
  * <p>
  * One of the consequences of this design is that the implementation should be stateless
- * and concurrent-safe. That is, the {@link #kill(OSProcess)} method can be invoked by multiple threads
+ * and concurrent-safe. That is, the {@link #kill(ProcessTree.OSProcess)} method can be invoked by multiple threads
  * concurrently on the single instance.
  *
  * <p>
  * Another consequence of this design is that if your {@link ProcessKiller} requires configuration,
  * it needs to be serializable, and configuration needs to be updated atomically, as another
- * thread may be calling into {@link #kill(OSProcess)} just when you are updating your configuration.
+ * thread may be calling into {@link #kill(ProcessTree.OSProcess)} just when you are updating your configuration.
  *
  * @author jpederzolli
  * @author Kohsuke Kawaguchi
@@ -62,7 +60,7 @@ public abstract class ProcessKiller implements ExtensionPoint, Serializable {
      * Returns all the registered {@link ProcessKiller} descriptors.
      */
     public static ExtensionList<ProcessKiller> all() {
-        return Jenkins.getInstance().getExtensionList(ProcessKiller.class);
+        return ExtensionList.lookup(ProcessKiller.class);
     }
 
     /**

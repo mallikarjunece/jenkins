@@ -25,10 +25,12 @@ package hudson.node_monitors;
 
 import hudson.Util;
 import hudson.Extension;
+import hudson.Functions;
 import hudson.model.Computer;
 import jenkins.model.Jenkins;
-import hudson.remoting.Callable;
+import jenkins.security.MasterToSlaveCallable;
 import net.sf.json.JSONObject;
+import org.jenkinsci.Symbol;
 import org.jvnet.hudson.MemoryMonitor;
 import org.jvnet.hudson.MemoryUsage;
 import org.kohsuke.stapler.StaplerRequest;
@@ -41,7 +43,7 @@ import java.io.IOException;
  * Checks the swap space availability.
  *
  * @author Kohsuke Kawaguchi
- * @sine 1.233
+ * @since 1.233
  */
 public class SwapSpaceMonitor extends NodeMonitor {
     /**
@@ -51,14 +53,16 @@ public class SwapSpaceMonitor extends NodeMonitor {
         if(usage.availableSwapSpace==-1)
             return "N/A";
 
+       String humanReadableSpace = Functions.humanReadableByteSize(usage.availableSwapSpace);
+       
         long free = usage.availableSwapSpace;
         free/=1024L;   // convert to KB
         free/=1024L;   // convert to MB
         if(free>256 || usage.totalSwapSpace<usage.availableSwapSpace*5)
-            return free+"MB"; // if we have more than 256MB free or less than 80% filled up, it's OK
+            return humanReadableSpace; // if we have more than 256MB free or less than 80% filled up, it's OK
 
         // Otherwise considered dangerously low.
-        return Util.wrapToErrorSpan(free+"MB");
+        return Util.wrapToErrorSpan(humanReadableSpace);
     }
 
     public long toMB(MemoryUsage usage) {
@@ -77,10 +81,21 @@ public class SwapSpaceMonitor extends NodeMonitor {
         return Jenkins.getInstance().hasPermission(Jenkins.ADMINISTER) ? super.getColumnCaption() : null;
     }
 
-    @Extension
-    public static final AbstractNodeMonitorDescriptor<MemoryUsage> DESCRIPTOR = new AbstractNodeMonitorDescriptor<MemoryUsage>() {
-        protected MemoryUsage monitor(Computer c) throws IOException, InterruptedException {
-            return c.getChannel().call(new MonitorTask());
+    /**
+     * @deprecated as of 2.0
+     *      use injection
+     */
+    public static /*almost final*/ AbstractNodeMonitorDescriptor<MemoryUsage> DESCRIPTOR;
+
+    @Extension @Symbol("swapSpace")
+    public static class DescriptorImpl extends AbstractAsyncNodeMonitorDescriptor<MemoryUsage> {
+        public DescriptorImpl() {
+            DESCRIPTOR = this;
+        }
+
+        @Override
+        protected MonitorTask createCallable(Computer c) {
+            return new MonitorTask();
         }
 
         public String getDisplayName() {
@@ -96,7 +111,7 @@ public class SwapSpaceMonitor extends NodeMonitor {
     /**
      * Obtains the string that represents the architecture.
      */
-    private static class MonitorTask implements Callable<MemoryUsage,IOException> {
+    private static class MonitorTask extends MasterToSlaveCallable<MemoryUsage,IOException> {
         public MemoryUsage call() throws IOException {
             MemoryMonitor mm;
             try {

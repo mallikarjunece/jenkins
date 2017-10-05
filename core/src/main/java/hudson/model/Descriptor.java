@@ -28,13 +28,18 @@ import hudson.PluginWrapper;
 import hudson.RelativePath;
 import hudson.XmlFile;
 import hudson.BulkChange;
+import hudson.ExtensionList;
 import hudson.Util;
 import hudson.model.listeners.SaveableListener;
 import hudson.util.FormApply;
+import hudson.util.FormValidation.CheckMethod;
 import hudson.util.ReflectionUtils;
 import hudson.util.ReflectionUtils.Parameter;
 import hudson.views.ListViewColumn;
+import jenkins.model.GlobalConfiguration;
+import jenkins.model.GlobalConfigurationCategory;
 import jenkins.model.Jenkins;
+import jenkins.util.io.OnMaster;
 import net.sf.json.JSONArray;
 import net.sf.json.JSONObject;
 import org.kohsuke.stapler.*;
@@ -44,7 +49,6 @@ import org.springframework.util.StringUtils;
 import org.jvnet.tiger_types.Types;
 import org.apache.commons.io.IOUtils;
 
-import static hudson.Functions.*;
 import static hudson.util.QuotedStringTokenizer.*;
 import static javax.servlet.http.HttpServletResponse.SC_NOT_FOUND;
 import javax.servlet.ServletException;
@@ -71,8 +75,10 @@ import java.lang.reflect.Type;
 import java.lang.reflect.Field;
 import java.lang.reflect.ParameterizedType;
 import java.beans.Introspector;
+import java.util.IdentityHashMap;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 /**
  * Metadata about a configurable instance.
@@ -121,13 +127,13 @@ import javax.annotation.Nonnull;
  * @author Kohsuke Kawaguchi
  * @see Describable
  */
-public abstract class Descriptor<T extends Describable<T>> implements Saveable {
+public abstract class Descriptor<T extends Describable<T>> implements Saveable, OnMaster {
     /**
      * The class being described by this descriptor.
      */
     public transient final Class<? extends T> clazz;
 
-    private transient final Map<String,String> checkMethods = new ConcurrentHashMap<String,String>();
+    private transient final Map<String,CheckMethod> checkMethods = new ConcurrentHashMap<String,CheckMethod>();
 
     /**
      * Lazily computed list of properties on {@link #clazz} and on the descriptor itself.
@@ -195,11 +201,11 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
         public Descriptor getItemTypeDescriptorOrDie() {
             Class it = getItemType();
             if (it == null) {
-                throw new AssertionError(clazz + " is not an array/collection type in " + displayName + ". See https://wiki.jenkins-ci.org/display/JENKINS/My+class+is+missing+descriptor");
+                throw new AssertionError(clazz + " is not an array/collection type in " + displayName + ". See https://jenkins.io/redirect/developer/class-is-missing-descriptor");
             }
             Descriptor d = Jenkins.getInstance().getDescriptor(it);
             if (d==null)
-                throw new AssertionError(it +" is missing its descriptor in "+displayName+". See https://wiki.jenkins-ci.org/display/JENKINS/My+class+is+missing+descriptor");
+                throw new AssertionError(it +" is missing its descriptor in "+displayName+". See https://jenkins.io/redirect/developer/class-is-missing-descriptor");
             return d;
         }
 
@@ -223,7 +229,22 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
      *
      * @see #getHelpFile(String) 
      */
-    private transient final Map<String,String> helpRedirect = new HashMap<String, String>();
+    private transient final Map<String,HelpRedirect> helpRedirect = new HashMap<String,HelpRedirect>();
+
+    private static class HelpRedirect {
+        private final Class<? extends Describable> owner;
+        private final String fieldNameToRedirectTo;
+
+        private HelpRedirect(Class<? extends Describable> owner, String fieldNameToRedirectTo) {
+            this.owner = owner;
+            this.fieldNameToRedirectTo = fieldNameToRedirectTo;
+        }
+
+        private String resolve() {
+            // the resolution has to be deferred to avoid ordering issue among descriptor registrations.
+            return Jenkins.getInstance().getDescriptor(owner).getHelpFile(fieldNameToRedirectTo);
+        }
+    }
 
     /**
      *
@@ -277,8 +298,15 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
 
     /**
      * Human readable name of this kind of configurable object.
+     * Should be overridden for most descriptors, if the display name is visible somehow.
+     * As a fallback it uses {@link Class#getSimpleName} on {@link #clazz}, so for example {@code MyThing} from {@code some.pkg.MyThing.DescriptorImpl}.
+     * Historically some implementations returned null as a way of hiding the descriptor from the UI,
+     * but this is generally managed by an explicit method such as {@code isEnabled} or {@code isApplicable}.
      */
-    public abstract String getDisplayName();
+    @Nonnull
+    public String getDisplayName() {
+        return clazz.getSimpleName();
+    }
 
     /**
      * Uniquely identifies this {@link Descriptor} among all the other {@link Descriptor}s.
@@ -347,68 +375,28 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
     }
 
     /**
-     * If the field "xyz" of a {@link Describable} has the corresponding "doCheckXyz" method,
-     * return the form-field validation string. Otherwise null.
-     * <p>
-     * This method is used to hook up the form validation method to the corresponding HTML input element.
+     * @deprecated since 1.528
+     *      Use {@link #getCheckMethod(String)}
      */
+    @Deprecated
     public String getCheckUrl(String fieldName) {
-        String method = checkMethods.get(fieldName);
-        if(method==null) {
-            method = calcCheckUrl(fieldName);
-            checkMethods.put(fieldName,method);
-        }
-
-        if (method.equals(NONE)) // == would do, but it makes IDE flag a warning
-            return null;
-
-        // put this under the right contextual umbrella.
-        // a is always non-null because we already have Hudson as the sentinel
-        return '\'' + jsStringEscape(getCurrentDescriptorByNameUrl()) + "/'+" + method;
-    }
-
-    private String calcCheckUrl(String fieldName) {
-        String capitalizedFieldName = StringUtils.capitalize(fieldName);
-
-        Method method = ReflectionUtils.getPublicMethodNamed(getClass(),"doCheck"+ capitalizedFieldName);
-
-        if(method==null)
-            return NONE;
-
-        return '\'' + getDescriptorUrl() + "/check" + capitalizedFieldName + '\'' + buildParameterList(method, new StringBuilder()).append(".toString()");
+        return getCheckMethod(fieldName).toCheckUrl();
     }
 
     /**
-     * Builds query parameter line by figuring out what should be submitted
+     * If the field "xyz" of a {@link Describable} has the corresponding "doCheckXyz" method,
+     * return the model of the check method.
+     * <p>
+     * This method is used to hook up the form validation method to the corresponding HTML input element.
      */
-    private StringBuilder buildParameterList(Method method, StringBuilder query) {
-        for (Parameter p : ReflectionUtils.getParameters(method)) {
-            QueryParameter qp = p.annotation(QueryParameter.class);
-            if (qp!=null) {
-                String name = qp.value();
-                if (name.length()==0) name = p.name();
-                if (name==null || name.length()==0)
-                    continue;   // unknown parameter name. we'll report the error when the form is submitted.
-
-                RelativePath rp = p.annotation(RelativePath.class);
-                if (rp!=null)
-                    name = rp.value()+'/'+name;
-
-                if (query.length()==0)  query.append("+qs(this)");
-
-                if (name.equals("value")) {
-                    // The special 'value' parameter binds to the the current field
-                    query.append(".addThis()");
-                } else {
-                    query.append(".nearBy('"+name+"')");
-                }
-                continue;
-            }
-
-            Method m = ReflectionUtils.getPublicMethodNamed(p.type(), "fromStapler");
-            if (m!=null)    buildParameterList(m,query);
+    public CheckMethod getCheckMethod(String fieldName) {
+        CheckMethod method = checkMethods.get(fieldName);
+        if(method==null) {
+            method = new CheckMethod(this,fieldName);
+            checkMethods.put(fieldName,method);
         }
-        return query;
+
+        return method;
     }
 
     /**
@@ -469,7 +457,7 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
     }
 
     /**
-     * Used by Jelly to abstract away the handlign of global.jelly vs config.jelly databinding difference.
+     * Used by Jelly to abstract away the handling of global.jelly vs config.jelly databinding difference.
      */
     public @CheckForNull PropertyType getPropertyType(@Nonnull Object instance, @Nonnull String field) {
         // in global.jelly, instance==descriptor
@@ -477,7 +465,7 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
     }
 
     /**
-     * Akin to {@link #getPropertyType(Object,String) but never returns null.
+     * Akin to {@link #getPropertyType(Object,String)} but never returns null.
      * @throws AssertionError in case the field cannot be found
      * @since 1.492
      */
@@ -537,6 +525,7 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
      *      Implement {@link #newInstance(StaplerRequest, JSONObject)} method instead.
      *      Deprecated as of 1.145. 
      */
+    @Deprecated
     public T newInstance(StaplerRequest req) throws FormException {
         throw new UnsupportedOperationException(getClass()+" should implement newInstance(StaplerRequest,JSONObject)");
     }
@@ -575,7 +564,7 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
      *      Signals a problem in the submitted form.
      * @since 1.145
      */
-    public T newInstance(StaplerRequest req, JSONObject formData) throws FormException {
+    public T newInstance(@Nullable StaplerRequest req, @Nonnull JSONObject formData) throws FormException {
         try {
             Method m = getClass().getMethod("newInstance", StaplerRequest.class);
 
@@ -590,17 +579,104 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
                 }
 
                 // new behavior as of 1.206
-                return verifyNewInstance(req.bindJSON(clazz,formData));
+                BindInterceptor oldInterceptor = req.getBindInterceptor();
+                try {
+                    NewInstanceBindInterceptor interceptor;
+                    if (oldInterceptor instanceof NewInstanceBindInterceptor) {
+                        interceptor = (NewInstanceBindInterceptor) oldInterceptor;
+                    } else {
+                        interceptor = new NewInstanceBindInterceptor(oldInterceptor);
+                        req.setBindInterceptor(interceptor);
+                    }
+                    interceptor.processed.put(formData, true);
+                    return verifyNewInstance(req.bindJSON(clazz, formData));
+                } finally {
+                    req.setBindInterceptor(oldInterceptor);
+                }
             }
         } catch (NoSuchMethodException e) {
             throw new AssertionError(e); // impossible
-        } catch (InstantiationException e) {
+        } catch (InstantiationException | IllegalAccessException | RuntimeException e) {
             throw new Error("Failed to instantiate "+clazz+" from "+formData,e);
-        } catch (IllegalAccessException e) {
-            throw new Error("Failed to instantiate "+clazz+" from "+formData,e);
-        } catch (RuntimeException e) {
-            throw new RuntimeException("Failed to instantiate "+clazz+" from "+formData,e);
         }
+    }
+
+    /**
+     * Ensures that calls to {@link StaplerRequest#bindJSON(Class, JSONObject)} from {@link #newInstance(StaplerRequest, JSONObject)} recurse properly.
+     * {@code doConfigSubmit}-like methods will wind up calling {@code newInstance} directly
+     * or via {@link #newInstancesFromHeteroList(StaplerRequest, Object, Collection)},
+     * which consult any custom {@code newInstance} overrides for top-level {@link Describable} objects.
+     * But for nested describable objects Stapler would know nothing about {@code newInstance} without this trick.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static class NewInstanceBindInterceptor extends BindInterceptor {
+
+        private final BindInterceptor oldInterceptor;
+        private final Map<JSONObject,Boolean> processed = new IdentityHashMap<>();
+
+        NewInstanceBindInterceptor(BindInterceptor oldInterceptor) {
+            LOGGER.log(Level.FINER, "new interceptor delegating to {0}", oldInterceptor);
+            this.oldInterceptor = oldInterceptor;
+        }
+
+        private boolean isApplicable(Class type, JSONObject json) {
+            if (Modifier.isAbstract(type.getModifiers())) {
+                LOGGER.log(Level.FINER, "ignoring abstract {0} {1}", new Object[] {type.getName(), json});
+                return false;
+            }
+            if (!Describable.class.isAssignableFrom(type)) {
+                LOGGER.log(Level.FINER, "ignoring non-Describable {0} {1}", new Object[] {type.getName(), json});
+                return false;
+            }
+            if (Boolean.TRUE.equals(processed.put(json, true))) {
+                LOGGER.log(Level.FINER, "already processed {0} {1}", new Object[] {type.getName(), json});
+                return false;
+            }
+            return true;
+        }
+
+        @Override
+        public Object instantiate(Class actualType, JSONObject json) {
+            if (isApplicable(actualType, json)) {
+                LOGGER.log(Level.FINE, "switching to newInstance {0} {1}", new Object[] {actualType.getName(), json});
+                try {
+                    final Descriptor descriptor = Jenkins.getActiveInstance().getDescriptor(actualType);
+                    if (descriptor != null) {
+                        return descriptor.newInstance(Stapler.getCurrentRequest(), json);
+                    } else {
+                        LOGGER.log(Level.WARNING, "Descriptor not found. Falling back to default instantiation "
+                                + actualType.getName() + " " + json);
+                    }
+                } catch (Exception x) {
+                    LOGGER.log(Level.WARNING, "falling back to default instantiation " + actualType.getName() + " " + json, x);
+                    // If nested objects are not using newInstance, bindJSON will wind up throwing the same exception anyway,
+                    // so logging above will result in a duplicated stack trace.
+                    // However if they *are* then this is the only way to find errors in that newInstance.
+                    // Normally oldInterceptor.instantiate will just return DEFAULT, not actually do anything,
+                    // so we cannot try calling the default instantiation and then decide which problem to report.
+                }
+            }
+            return oldInterceptor.instantiate(actualType, json);
+        }
+
+        @Override
+        public Object onConvert(Type targetType, Class targetTypeErasure, Object jsonSource) {
+            if (jsonSource instanceof JSONObject) {
+                JSONObject json = (JSONObject) jsonSource;
+                if (isApplicable(targetTypeErasure, json)) {
+                    LOGGER.log(Level.FINE, "switching to newInstance {0} {1}", new Object[] {targetTypeErasure.getName(), json});
+                    try {
+                        return Jenkins.getActiveInstance().getDescriptor(targetTypeErasure).newInstance(Stapler.getCurrentRequest(), json);
+                    } catch (Exception x) {
+                        LOGGER.log(Level.WARNING, "falling back to default instantiation " + targetTypeErasure.getName() + " " + json, x);
+                    }
+                }
+            } else {
+                LOGGER.log(Level.FINER, "ignoring non-object {0}", jsonSource);
+            }
+            return oldInterceptor.onConvert(targetType, targetTypeErasure, jsonSource);
+        }
+
     }
 
     /**
@@ -657,8 +733,8 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
     }
 
     public String getHelpFile(Klass<?> clazz, String fieldName) {
-        String v = helpRedirect.get(fieldName);
-        if (v!=null)    return v;
+        HelpRedirect r = helpRedirect.get(fieldName);
+        if (r!=null)    return r.resolve();
 
         for (Klass<?> c : clazz.getAncestors()) {
             String page = "/descriptor/" + getId() + "/help";
@@ -688,8 +764,7 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
      * @since 1.425
      */
     protected void addHelpFileRedirect(String fieldName, Class<? extends Describable> owner, String fieldNameToRedirectTo) {
-        helpRedirect.put(fieldName,
-            Jenkins.getInstance().getDescriptor(owner).getHelpFile(fieldNameToRedirectTo));
+        helpRedirect.put(fieldName, new HelpRedirect(owner,fieldNameToRedirectTo));
     }
 
     /**
@@ -710,6 +785,7 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
      * @deprecated
      *      As of 1.239, use {@link #configure(StaplerRequest, JSONObject)}.
      */
+    @Deprecated
     public boolean configure( StaplerRequest req ) throws FormException {
         return true;
     }
@@ -717,7 +793,7 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
     /**
      * Invoked when the global configuration page is submitted.
      *
-     * Can be overriden to store descriptor-specific information.
+     * Can be overridden to store descriptor-specific information.
      *
      * @param json
      *      The JSON object that captures the configuration data for this {@link Descriptor}.
@@ -737,7 +813,18 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
     public String getGlobalConfigPage() {
         return getViewPage(clazz, getPossibleViewNames("global"), null);
     }
-    
+
+    /**
+     * Define the global configuration category the global config of this Descriptor is in.
+     *
+     * @return never null, always the same value for a given instance of {@link Descriptor}.
+     *
+     * @since 2.0, used to be in {@link GlobalConfiguration} before that.
+     */
+    public GlobalConfigurationCategory getCategory() {
+        return GlobalConfigurationCategory.get(GlobalConfigurationCategory.Unclassified.class);
+    }
+
     private String getViewPage(Class<?> clazz, String pageName, String defaultValue) {
         return getViewPage(clazz,Collections.singleton(pageName),defaultValue);
     }
@@ -851,12 +938,9 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
             if(url!=null) {
                 // TODO: generalize macro expansion and perhaps even support JEXL
                 rsp.setContentType("text/html;charset=UTF-8");
-                InputStream in = url.openStream();
-                try {
+                try (InputStream in = url.openStream()) {
                     String literal = IOUtils.toString(in,"UTF-8");
                     rsp.getWriter().println(Util.replaceMacro(literal, Collections.singletonMap("rootURL",req.getContextPath())));
-                } finally {
-                    IOUtils.closeQuietly(in);
                 }
                 return;
             }
@@ -906,7 +990,7 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
     }
 
     /**
-     * Used to build {@link Describable} instance list from &lt;f:hetero-list> tag.
+     * Used to build {@link Describable} instance list from {@code <f:hetero-list>} tag.
      *
      * @param req
      *      Request that represents the form submission.
@@ -935,10 +1019,35 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
         if (formData!=null) {
             for (Object o : JSONArray.fromObject(formData)) {
                 JSONObject jo = (JSONObject)o;
-                String kind = jo.getString("kind");
-                Descriptor<T> d = find(descriptors, kind);
+                Descriptor<T> d = null;
+                // 'kind' and '$class' are mutually exclusive (see class-entry.jelly), but to be more lenient on the reader side,
+                // we check them both anyway. 'kind' (which maps to ID) is more unique than '$class', which can have multiple matching
+                // Descriptors, so we prefer 'kind' if it's present.
+                String kind = jo.optString("kind", null);
+                if (kind != null) {
+                    // Only applies when Descriptor.getId is overridden.
+                    // Note that kind is only supported here,
+                    // *not* inside the StaplerRequest.bindJSON which is normally called by newInstance
+                    // (since Descriptor.newInstance is not itself available to Stapler).
+                    // If you merely override getId for some reason, but use @DataBoundConstructor on your Describable,
+                    // there is no problem; but you can only rely on newInstance being called at top level.
+                    d = findById(descriptors, kind);
+                }
+                if (d == null) {
+                  kind = jo.optString("$class");
+                  if (kind != null) { // else we will fall through to the warning
+                      // This is the normal case.
+                      d = findByDescribableClassName(descriptors, kind);
+                      if (d == null) {
+                          // Deprecated system where stapler-class was the Descriptor class name (rather than Describable class name).
+                          d = findByClassName(descriptors, kind);
+                      }
+                  }
+                }
                 if (d != null) {
                     items.add(d.newInstance(req, jo));
+                } else {
+                    LOGGER.log(Level.WARNING, "Received unexpected form data element: {0}", jo);
                 }
             }
         }
@@ -947,24 +1056,60 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
     }
 
     /**
-     * Finds a descriptor from a collection by its class name.
+     * Finds a descriptor from a collection by its ID.
+     * @param id should match {@link #getId}
+     * @since 1.610
      */
-    public static @CheckForNull <T extends Descriptor> T find(Collection<? extends T> list, String className) {
+    public static @CheckForNull <T extends Descriptor> T findById(Collection<? extends T> list, String id) {
         for (T d : list) {
-            if(d.getClass().getName().equals(className))
-                return d;
-        }
-        // Since we introduced Descriptor.getId(), it is a preferred method of identifying descriptor by a string.
-        // To make that migration easier without breaking compatibility, let's also match up with the id.
-        for (T d : list) {
-            if(d.getId().equals(className))
+            if(d.getId().equals(id))
                 return d;
         }
         return null;
     }
 
+    /**
+     * Finds a descriptor from a collection by the class name of the {@link Descriptor}.
+     * This is useless as of the introduction of {@link #getId} and so only very old compatibility code needs it.
+     */
+    private static @CheckForNull <T extends Descriptor> T findByClassName(Collection<? extends T> list, String className) {
+        for (T d : list) {
+            if(d.getClass().getName().equals(className))
+                return d;
+        }
+        return null;
+    }
+
+    /**
+     * Finds a descriptor from a collection by the class name of the {@link Describable} it describes.
+     * @param className should match {@link Class#getName} of a {@link #clazz}
+     * @since 1.610
+     */
+    public static @CheckForNull <T extends Descriptor> T findByDescribableClassName(Collection<? extends T> list, String className) {
+        for (T d : list) {
+            if(d.clazz.getName().equals(className))
+                return d;
+        }
+        return null;
+    }
+
+    /**
+     * Finds a descriptor from a collection by its class name or ID.
+     * @deprecated choose between {@link #findById} or {@link #findByDescribableClassName}
+     */
+    public static @CheckForNull <T extends Descriptor> T find(Collection<? extends T> list, String string) {
+        T d = findByClassName(list, string);
+        if (d != null) {
+                return d;
+        }
+        return findById(list, string);
+    }
+
+    /**
+     * @deprecated choose between {@link #findById} or {@link #findByDescribableClassName}
+     */
     public static @CheckForNull Descriptor find(String className) {
-        return find(Jenkins.getInstance().getExtensionList(Descriptor.class),className);
+        return find(ExtensionList.lookup(Descriptor.class),className);
     }
 
     public static final class FormException extends Exception implements HttpResponse {
@@ -994,21 +1139,16 @@ public abstract class Descriptor<T extends Describable<T>> implements Saveable {
 
         public void generateResponse(StaplerRequest req, StaplerResponse rsp, Object node) throws IOException, ServletException {
             if (FormApply.isApply(req)) {
-                FormApply.applyResponse("notificationBar.show(" + quote(getMessage())+ ",notificationBar.defaultOptions.ERROR)")
+                FormApply.applyResponse("notificationBar.show(" + quote(getMessage())+ ",notificationBar.ERROR)")
                         .generateResponse(req, rsp, node);
             } else {
                 // for now, we can't really use the field name that caused the problem.
-                new Failure(getMessage()).generateResponse(req,rsp,node);
+                new Failure(getMessage()).generateResponse(req,rsp,node,getCause());
             }
         }
     }
 
     private static final Logger LOGGER = Logger.getLogger(Descriptor.class.getName());
-
-    /**
-     * Used in {@link #checkMethods} to indicate that there's no check method.
-     */
-    private static final String NONE = "\u0000";
 
     /**
      * Special type indicating that {@link Descriptor} describes itself.

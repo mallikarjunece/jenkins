@@ -1,7 +1,7 @@
 /*
  * The MIT License
  * 
- * Copyright (c) 2004-2009, Sun Microsystems, Inc., Kohsuke Kawaguchi
+ * Copyright (c) 2004-2009, Sun Microsystems, Inc., Kohsuke Kawaguchi, Geoff Cummings
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,24 +27,15 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import hudson.model.AbstractBuild;
-import hudson.model.Item;
 import hudson.model.Job;
 import hudson.model.Node;
 import hudson.model.Result;
 import hudson.model.Run;
+import hudson.model.TopLevelItem;
 import hudson.model.View;
 import hudson.util.Iterators.CountingPredicate;
 
-import java.util.AbstractList;
-import java.util.ArrayList;
-import java.util.Calendar;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.GregorianCalendar;
-import java.util.Iterator;
-import java.util.List;
-import java.util.NoSuchElementException;
+import java.util.*;
 
 /**
  * {@link List} of {@link Run}s, sorted in the descending date order.
@@ -67,23 +58,42 @@ public class RunList<R extends Run> extends AbstractList<R> {
     }
 
     public RunList(View view) {// this is a type unsafe operation
-        List<Iterable<R>> jobs = new ArrayList<Iterable<R>>();
-        for (Item item : view.getItems())
-            for (Job<?,?> j : item.getAllJobs())
-                jobs.add(((Job)j).getBuilds());
+        Set<Job> jobs = new HashSet<Job>();
+        for (TopLevelItem item : view.getItems())
+            jobs.addAll(item.getAllJobs());
 
-        this.base = combine(jobs);
+        List<Iterable<R>> runLists = new ArrayList<Iterable<R>>();
+        for (Job job : jobs) {
+            runLists.add(job.getBuilds());
+        }
+        this.base = combine(runLists);
     }
 
     public RunList(Collection<? extends Job> jobs) {
-        List<Iterable<R>> src = new ArrayList<Iterable<R>>();
+        List<Iterable<R>> runLists = new ArrayList<Iterable<R>>();
         for (Job j : jobs)
-            src.add(j.getBuilds());
-        this.base = combine(src);
+            runLists.add(j.getBuilds());
+        this.base = combine(runLists);
     }
 
-    private Iterable<R> combine(Iterable<Iterable<R>> jobs) {
-        return Iterables.mergeSorted(jobs, new Comparator<R>() {
+    /**
+     * Creates a a {@link RunList} combining all the runs of the supplied jobs.
+     *
+     * @param jobs the supplied jobs.
+     * @param <J> the base class of job.
+     * @param <R> the base class of run.
+     * @return the run list.
+     * @since 2.37
+     */
+    public static <J extends Job<J,R>, R extends Run<J,R>> RunList<R> fromJobs(Iterable<? extends J> jobs) {
+        List<Iterable<R>> runLists = new ArrayList<>();
+        for (Job j : jobs)
+            runLists.add(j.getBuilds());
+        return new RunList<>(combine(runLists));
+    }
+
+    private static <R extends Run> Iterable<R> combine(Iterable<Iterable<R>> runLists) {
+        return Iterables.mergeSorted(runLists, new Comparator<R>() {
             public int compare(R o1, R o2) {
                 long lhs = o1.getTimeInMillis();
                 long rhs = o2.getTimeInMillis();
@@ -108,6 +118,7 @@ public class RunList<R extends Run> extends AbstractList<R> {
      *      {@link RunList}, despite its name, should be really used as {@link Iterable}, not as {@link List}.
      */
     @Override
+    @Deprecated
     public int size() {
         if (size==null) {
             int sz=0;
@@ -125,6 +136,7 @@ public class RunList<R extends Run> extends AbstractList<R> {
      *      {@link RunList}, despite its name, should be really used as {@link Iterable}, not as {@link List}.
      */
     @Override
+    @Deprecated
     public R get(int index) {
         return Iterators.get(iterator(),index);
     }
@@ -173,6 +185,8 @@ public class RunList<R extends Run> extends AbstractList<R> {
         return !iterator().hasNext();
     }
 
+    /** @deprecated see {@link #size()} for why this violates lazy-loading */
+    @Deprecated
     public R getFirstBuild() {
         size();
         return first;
@@ -190,9 +204,10 @@ public class RunList<R extends Run> extends AbstractList<R> {
 
     /**
      * Returns elements that satisfy the given predicate.
+     * <em>Warning:</em> this method mutates the original list and then returns it.
+     * @since 1.544
      */
-    // for compatibility reasons, this method doesn't create a new list but updates the current one
-    private RunList<R> filter(Predicate<R> predicate) {
+    public RunList<R> filter(Predicate<R> predicate) {
         size = null;
         first = null;
         base = Iterables.filter(base,predicate);
@@ -221,6 +236,13 @@ public class RunList<R extends Run> extends AbstractList<R> {
         return this;
     }
 
+    /**
+     * Return only the most recent builds.
+     * <em>Warning:</em> this method mutates the original list and then returns it.
+     * @param n a count
+     * @return the n most recent builds
+     * @since 1.507
+     */
     public RunList<R> limit(final int n) {
         return limit(new CountingPredicate<R>() {
             public boolean apply(int index, R input) {
@@ -231,6 +253,7 @@ public class RunList<R extends Run> extends AbstractList<R> {
 
     /**
      * Filter the list to non-successful builds only.
+     * <em>Warning:</em> this method mutates the original list and then returns it.
      */
     public RunList<R> failureOnly() {
         return filter(new Predicate<R>() {
@@ -241,7 +264,34 @@ public class RunList<R extends Run> extends AbstractList<R> {
     }
 
     /**
+     * Filter the list to builds above threshold.
+     * <em>Warning:</em> this method mutates the original list and then returns it.
+     * @since 1.517
+     */
+    public RunList<R> overThresholdOnly(final Result threshold) {
+        return filter(new Predicate<R>() {
+            public boolean apply(R r) {
+                return (r.getResult() != null && r.getResult().isBetterOrEqualTo(threshold));
+            }
+        });
+    }
+
+    /**
+     * Filter the list to completed builds.
+     * <em>Warning:</em> this method mutates the original list and then returns it.
+     * @since 1.561
+     */
+    public RunList<R> completedOnly() {
+        return filter(new Predicate<R>() {
+            public boolean apply(R r) {
+                return !r.isBuilding();
+            }
+        });
+    }
+
+    /**
      * Filter the list to builds on a single node only
+     * <em>Warning:</em> this method mutates the original list and then returns it.
      */
     public RunList<R> node(final Node node) {
         return filter(new Predicate<R>() {
@@ -253,6 +303,7 @@ public class RunList<R extends Run> extends AbstractList<R> {
 
     /**
      * Filter the list to regression builds only.
+     * <em>Warning:</em> this method mutates the original list and then returns it.
      */
     public RunList<R> regressionOnly() {
         return filter(new Predicate<R>() {
@@ -266,17 +317,18 @@ public class RunList<R extends Run> extends AbstractList<R> {
      * Filter the list by timestamp.
      *
      * {@code s&lt=;e}.
+     * <em>Warning:</em> this method mutates the original list and then returns it.
      */
     public RunList<R> byTimestamp(final long start, final long end) {
         return
         limit(new CountingPredicate<R>() {
-            public boolean apply(int index,R r) {
-                return r.getTimeInMillis()<end;
-            }
-        }).filter(new Predicate<R>() {
-            public boolean apply(R r) {
+            public boolean apply(int index, R r) {
                 return start<=r.getTimeInMillis();
             }
+        }).filter(new Predicate<R>() {
+        	public boolean apply(R r) {
+        		return r.getTimeInMillis()<end;
+                    }
         });
     }
 
@@ -284,6 +336,7 @@ public class RunList<R extends Run> extends AbstractList<R> {
      * Reduce the size of the list by only leaving relatively new ones.
      * This also removes on-going builds, as RSS cannot be used to publish information
      * if it changes.
+     * <em>Warning:</em> this method mutates the original list and then returns it.
      */
     public RunList<R> newBuilds() {
         GregorianCalendar cal = new GregorianCalendar();

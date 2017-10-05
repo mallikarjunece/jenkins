@@ -63,7 +63,8 @@ public abstract class ConfidentialStore {
     public static @Nonnull ConfidentialStore get() {
         if (TEST!=null) return TEST.get();
 
-        Lookup lookup = Jenkins.getInstance().lookup;
+        Jenkins j = Jenkins.getInstance();
+        Lookup lookup = j.lookup;
         ConfidentialStore cs = lookup.get(ConfidentialStore.class);
         if (cs==null) {
             try {

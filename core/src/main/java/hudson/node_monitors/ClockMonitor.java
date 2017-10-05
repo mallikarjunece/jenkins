@@ -25,8 +25,12 @@ package hudson.node_monitors;
 
 import hudson.model.Computer;
 import hudson.model.Node;
+import hudson.remoting.Callable;
 import hudson.util.ClockDifference;
 import hudson.Extension;
+import org.jenkinsci.Symbol;
+import org.kohsuke.accmod.Restricted;
+import org.kohsuke.accmod.restrictions.NoExternalUse;
 import org.kohsuke.stapler.StaplerRequest;
 
 import java.io.IOException;
@@ -45,12 +49,24 @@ public class ClockMonitor extends NodeMonitor {
         return DESCRIPTOR.get(c);
     }
 
-    @Extension
-    public static final AbstractNodeMonitorDescriptor<ClockDifference> DESCRIPTOR = new AbstractNodeMonitorDescriptor<ClockDifference>() {
-        protected ClockDifference monitor(Computer c) throws IOException, InterruptedException {
+    /**
+     * @deprecated as of 2.0
+     *      Don't use this field, use injection.
+     */
+    @Restricted(NoExternalUse.class)
+    public static /*almost final*/ AbstractNodeMonitorDescriptor<ClockDifference> DESCRIPTOR;
+
+    @Extension @Symbol("clock")
+    public static class DescriptorImpl extends AbstractAsyncNodeMonitorDescriptor<ClockDifference> {
+        public DescriptorImpl() {
+            DESCRIPTOR = this;
+        }
+
+        @Override
+        protected Callable<ClockDifference,IOException> createCallable(Computer c) {
             Node n = c.getNode();
             if(n==null) return null;
-            return n.getClockDifference();
+            return n.getClockDifferenceCallable();
         }
 
         public String getDisplayName() {

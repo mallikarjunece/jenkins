@@ -30,12 +30,14 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.ListIterator;
+import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
 
 /**
  * Annotates one line of console output.
  *
  * <p>
- * In Hudson, console output annotation is done line by line, and
+ * In Jenkins, console output annotation is done line by line, and
  * we model this as a state machine &mdash;
  * the code encapsulates some state, and it uses that to annotate one line (and possibly update the state.)
  *
@@ -54,7 +56,7 @@ import java.util.ListIterator;
  * </pre>
  *
  * <p>
- * Because of a browser can request console output incrementally, in addition to above a console annotator
+ * Because a browser can request console output incrementally, in addition to above a console annotator
  * can be serialized at any point and deserialized back later to continue annotation where it left off.
  *
  * <p>
@@ -71,15 +73,16 @@ public abstract class ConsoleAnnotator<T> implements Serializable {
      * Annotates one line.
      *
      * @param context
-     *      The object that owns the console output. Never null.
+     *      The object that owns the console output. Never {@code null}.
      * @param text
      *      Contains a single line of console output, and defines convenient methods to add markup.
-     *      The callee should put markup into this object. Never null.
+     *      The callee should put markup into this object. Never {@code null}.
      * @return
      *      The {@link ConsoleAnnotator} object that will annotate the next line of the console output.
-     *      To indicate that you are not interested in the following lines, return null.
+     *      To indicate that you are not interested in the following lines, return {@code null}.
      */
-    public abstract ConsoleAnnotator annotate(T context, MarkupText text );
+    @CheckForNull
+    public abstract ConsoleAnnotator annotate(@Nonnull T context, @Nonnull MarkupText text );
 
     /**
      * Cast operation that restricts T.

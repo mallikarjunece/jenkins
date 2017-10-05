@@ -32,11 +32,13 @@ import java.util.List;
 import javax.servlet.ServletException;
 
 import jenkins.model.Jenkins;
+import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.StaplerResponse;
 import org.kohsuke.stapler.DataBoundConstructor;
 import hudson.model.Descriptor.FormException;
 import hudson.Extension;
+import org.kohsuke.stapler.interceptor.RequirePOST;
 
 /**
  * {@link View} that only contains projects for which the current user has access to.
@@ -57,13 +59,14 @@ public class MyView extends View {
 
     @Override
     public boolean contains(TopLevelItem item) {
-        return item.hasPermission(Job.CONFIGURE);
+        return item.hasPermission(Item.CONFIGURE);
     }
 
+    @RequirePOST
     @Override
     public TopLevelItem doCreateItem(StaplerRequest req, StaplerResponse rsp)
             throws IOException, ServletException {
-        ItemGroup<? extends TopLevelItem> ig = getOwnerItemGroup();
+        ItemGroup<? extends TopLevelItem> ig = getOwner().getItemGroup();
         if (ig instanceof ModifiableItemGroup) {
             return ((ModifiableItemGroup<? extends TopLevelItem>)ig).doCreateItem(req, rsp);
         }
@@ -73,8 +76,8 @@ public class MyView extends View {
     @Override
     public Collection<TopLevelItem> getItems() {
         List<TopLevelItem> items = new ArrayList<TopLevelItem>();
-        for (TopLevelItem item : getOwnerItemGroup().getItems()) {
-            if (item.hasPermission(Job.CONFIGURE)) {
+        for (TopLevelItem item : getOwner().getItemGroup().getItems()) {
+            if (item.hasPermission(Item.CONFIGURE)) {
                 items.add(item);
             }
         }
@@ -87,16 +90,11 @@ public class MyView extends View {
     }
 
     @Override
-    public void onJobRenamed(Item item, String oldName, String newName) {
-        // noop
-    }
-
-    @Override
     protected void submit(StaplerRequest req) throws IOException, ServletException, FormException {
         // noop
     }
 
-    @Extension
+    @Extension @Symbol("myView")
     public static final class DescriptorImpl extends ViewDescriptor {
         /**
          * If the security is not enabled, there's no point in having

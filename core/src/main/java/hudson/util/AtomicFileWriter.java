@@ -23,6 +23,7 @@
  */
 package hudson.util;
 
+import hudson.Util;
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -31,9 +32,11 @@ import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 
 /**
- * Buffered {@link FileWriter} that uses UTF-8.
+ * Buffered {@link FileWriter} that supports atomic operations.
  *
  * <p>
  * The write operation is atomic when used for overwriting;
@@ -64,12 +67,16 @@ public class AtomicFileWriter extends Writer {
             dir.mkdirs();
             tmpFile = File.createTempFile("atomic",null, dir);
         } catch (IOException e) {
-            throw new IOException2("Failed to create a temporary file in "+ dir,e);
+            throw new IOException("Failed to create a temporary file in "+ dir,e);
         }
         destFile = f;
         if (encoding==null)
             encoding = Charset.defaultCharset().name();
-        core = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(tmpFile),encoding));
+        try {
+            core = new BufferedWriter(new OutputStreamWriter(Files.newOutputStream(tmpFile.toPath()), encoding));
+        } catch (InvalidPathException e) {
+            throw new IOException(e);
+        }
     }
 
     @Override
@@ -107,9 +114,13 @@ public class AtomicFileWriter extends Writer {
 
     public void commit() throws IOException {
         close();
-        if(destFile.exists() && !destFile.delete()) {
-            tmpFile.delete();
-            throw new IOException("Unable to delete "+destFile);
+        if (destFile.exists()) {
+            try {
+                Util.deleteFile(destFile);
+            } catch (IOException x) {
+                tmpFile.delete();
+                throw x;
+            }
         }
         tmpFile.renameTo(destFile);
     }

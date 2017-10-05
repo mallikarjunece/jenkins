@@ -23,28 +23,52 @@
  */
 package hudson.model;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import hudson.FilePath;
 import hudson.Functions;
-import hudson.tasks.Shell;
-import hudson.tasks.BatchFile;
 import hudson.Launcher;
+import hudson.tasks.ArtifactArchiver;
+import hudson.tasks.BatchFile;
+import hudson.tasks.Shell;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.util.zip.ZipFile;
+
+import org.junit.Assume;
+import org.junit.Rule;
+import org.junit.Test;
+import org.jvnet.hudson.test.Issue;
 import org.jvnet.hudson.test.Email;
-import org.jvnet.hudson.test.HudsonTestCase;
+import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.SingleFileSCM;
 import org.jvnet.hudson.test.TestBuilder;
 
-import java.io.IOException;
+import com.gargoylesoftware.htmlunit.Page;
+import com.gargoylesoftware.htmlunit.UnexpectedPage;
+import com.gargoylesoftware.htmlunit.html.HtmlPage;
+import java.io.OutputStream;
+import org.apache.commons.io.IOUtils;
 
 /**
  * @author Kohsuke Kawaguchi
  */
-public class DirectoryBrowserSupportTest extends HudsonTestCase {
+public class DirectoryBrowserSupportTest {
+
+    @Rule public JenkinsRule j = new JenkinsRule();
+
     /**
      * Double dots that appear in file name is OK.
      */
     @Email("http://www.nabble.com/Status-Code-400-viewing-or-downloading-artifact-whose-filename-contains-two-consecutive-periods-tt21407604.html")
-    public void testDoubleDots() throws Exception {
+    @Test
+    public void doubleDots() throws Exception {
         // create a problematic file name in the workspace
-        FreeStyleProject p = createFreeStyleProject();
+        FreeStyleProject p = j.createFreeStyleProject();
         if(Functions.isWindows())
             p.getBuildersList().add(new BatchFile("echo > abc..def"));
         else
@@ -52,7 +76,7 @@ public class DirectoryBrowserSupportTest extends HudsonTestCase {
         p.scheduleBuild2(0).get();
 
         // can we see it?
-        new WebClient().goTo("job/"+p.getName()+"/ws/abc..def","application/octet-stream");
+        j.createWebClient().goTo("job/"+p.getName()+"/ws/abc..def","application/octet-stream");
 
         // TODO: implement negative check to make sure we aren't serving unexpected directories.
         // the following trivial attempt failed. Someone in between is normalizing.
@@ -70,21 +94,23 @@ public class DirectoryBrowserSupportTest extends HudsonTestCase {
      * To prevent directory traversal attack, we now treat '\\' just like '/'.
      */
     @Email("http://www.nabble.com/Status-Code-400-viewing-or-downloading-artifact-whose-filename-contains-two-consecutive-periods-tt21407604.html")
-    public void testDoubleDots2() throws Exception {
-        if(Functions.isWindows())  return; // can't test this on Windows
+    @Test
+    public void doubleDots2() throws Exception {
+        Assume.assumeFalse("can't test this on Windows", Functions.isWindows());
 
         // create a problematic file name in the workspace
-        FreeStyleProject p = createFreeStyleProject();
+        FreeStyleProject p = j.createFreeStyleProject();
         p.getBuildersList().add(new Shell("mkdir abc; touch abc/def.bin"));
         p.scheduleBuild2(0).get();
 
         // can we see it?
-        new WebClient().goTo("job/"+p.getName()+"/ws/abc%5Cdef.bin","application/octet-stream");
+        j.createWebClient().goTo("job/"+p.getName()+"/ws/abc%5Cdef.bin","application/octet-stream");
     }
 
-    public void testNonAsciiChar() throws Exception {
+    @Test
+    public void nonAsciiChar() throws Exception {
         // create a problematic file name in the workspace
-        FreeStyleProject p = createFreeStyleProject();
+        FreeStyleProject p = j.createFreeStyleProject();
         p.getBuildersList().add(new TestBuilder() {
             public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener) throws InterruptedException, IOException {
                 build.getWorkspace().child("\u6F22\u5B57.bin").touch(0); // Kanji
@@ -94,11 +120,12 @@ public class DirectoryBrowserSupportTest extends HudsonTestCase {
         p.scheduleBuild2(0).get();
 
         // can we see it?
-        new WebClient().goTo("job/"+p.getName()+"/ws/%e6%bc%a2%e5%ad%97.bin","application/octet-stream");
+        j.createWebClient().goTo("job/"+p.getName()+"/ws/%e6%bc%a2%e5%ad%97.bin","application/octet-stream");
     }
 
-    public void testGlob() throws Exception {
-        FreeStyleProject p = createFreeStyleProject();
+    @Test
+    public void glob() throws Exception {
+        FreeStyleProject p = j.createFreeStyleProject();
         p.getBuildersList().add(new TestBuilder() {
             @Override public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener) throws InterruptedException, IOException {
                 FilePath ws = build.getWorkspace();
@@ -113,11 +140,76 @@ public class DirectoryBrowserSupportTest extends HudsonTestCase {
             }
         });
         assertEquals(Result.SUCCESS, p.scheduleBuild2(0).get().getResult());
-        String text = new WebClient().goTo("job/"+p.getName()+"/ws/**/*.java").asText();
+        String text = j.createWebClient().goTo("job/"+p.getName()+"/ws/**/*.java").asText();
         assertTrue(text, text.contains("X.java"));
         assertTrue(text, text.contains("XTest.java"));
         assertFalse(text, text.contains("pom.xml"));
         assertFalse(text, text.contains("x.txt"));
     }
 
+    @Issue("JENKINS-19752")
+    @Test
+    public void zipDownload() throws Exception {
+        FreeStyleProject p = j.createFreeStyleProject();
+        p.setScm(new SingleFileSCM("artifact.out", "Hello world!"));
+        p.getPublishersList().add(new ArtifactArchiver("*", "", true));
+        assertEquals(Result.SUCCESS, p.scheduleBuild2(0).get().getResult());
+
+        HtmlPage page = j.createWebClient().goTo("job/"+p.getName()+"/lastSuccessfulBuild/artifact/");
+        Page download = page.getAnchorByHref("./*zip*/archive.zip").click();
+        File zipfile = download((UnexpectedPage) download);
+
+        ZipFile readzip = new ZipFile(zipfile);
+
+        InputStream is = readzip.getInputStream(readzip.getEntry("archive/artifact.out"));
+
+        // ZipException in case of JENKINS-19752
+        assertFalse("Downloaded zip file must not be empty", is.read() == -1);
+
+        is.close();
+        readzip.close();
+        zipfile.delete();
+    }
+
+    @Issue("SECURITY-95")
+    @Test
+    public void contentSecurityPolicy() throws Exception {
+        FreeStyleProject p = j.createFreeStyleProject();
+        p.setScm(new SingleFileSCM("test.html", "<html><body><h1>Hello world!</h1></body></html>"));
+        p.getPublishersList().add(new ArtifactArchiver("*", "", true));
+        assertEquals(Result.SUCCESS, p.scheduleBuild2(0).get().getResult());
+
+        HtmlPage page = j.createWebClient().goTo("job/" + p.getName() + "/lastSuccessfulBuild/artifact/test.html");
+        for (String header : new String[]{"Content-Security-Policy", "X-WebKit-CSP", "X-Content-Security-Policy"}) {
+            assertEquals("Header set: " + header, page.getWebResponse().getResponseHeaderValue(header), DirectoryBrowserSupport.DEFAULT_CSP_VALUE);
+        }
+
+        String propName = DirectoryBrowserSupport.class.getName() + ".CSP";
+        String initialValue = System.getProperty(propName);
+        try {
+            System.setProperty(propName, "");
+            page = j.createWebClient().goTo("job/" + p.getName() + "/lastSuccessfulBuild/artifact/test.html");
+            for (String header : new String[]{"Content-Security-Policy", "X-WebKit-CSP", "X-Content-Security-Policy"}) {
+                assertFalse("Header not set: " + header, page.getWebResponse().getResponseHeaders().contains(header));
+            }
+        } finally {
+            if (initialValue == null) {
+                System.clearProperty(DirectoryBrowserSupport.class.getName() + ".CSP");
+            } else {
+                System.setProperty(DirectoryBrowserSupport.class.getName() + ".CSP", initialValue);
+            }
+        }
+    }
+
+    private File download(UnexpectedPage page) throws IOException {
+
+        File file = File.createTempFile("DirectoryBrowserSupport", "zipDownload");
+        file.delete();
+        try (InputStream is = page.getInputStream();
+             OutputStream os = Files.newOutputStream(file.toPath())) {
+            IOUtils.copy(is, os);
+        }
+
+        return file;
+    }
 }

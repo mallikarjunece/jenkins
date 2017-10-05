@@ -4,7 +4,11 @@ import hudson.Functions;
 import hudson.Util;
 import hudson.model.Action;
 import hudson.model.Actionable;
+import hudson.model.BallColor;
+import hudson.model.Computer;
+import hudson.model.Job;
 import hudson.model.ModelObject;
+import hudson.model.Node;
 import org.apache.commons.jelly.JellyContext;
 import org.apache.commons.jelly.JellyException;
 import org.apache.commons.jelly.JellyTagException;
@@ -39,6 +43,7 @@ import java.util.List;
  * shows the drop-down menu for providing quicker access to the actions to those objects.
  *     
  * @author Kohsuke Kawaguchi
+ * @see ModelObjectWithChildren
  */
 public interface ModelObjectWithContextMenu extends ModelObject {
     /**
@@ -52,8 +57,8 @@ public interface ModelObjectWithContextMenu extends ModelObject {
 
     /**
      * Data object that represents the context menu.
-     * 
-     * Via {@link HttpResponse}, this class is capable of converting itself to JSON that &lt;l:breadcrumb/> understands.
+     *
+     * Via {@link HttpResponse}, this class is capable of converting itself to JSON that {@code <l:breadcrumb/>} understands.
      */
     @ExportedBean
     public class ContextMenu implements HttpResponse {
@@ -77,8 +82,14 @@ public interface ModelObjectWithContextMenu extends ModelObject {
                 add(a);
             return this;
         }
-        
+
+        /**
+         * @see ContextMenuVisibility
+         */
         public ContextMenu add(Action a) {
+            if (!Functions.isContextMenuVisible(a)) {
+                return this;
+            }
             StaplerRequest req = Stapler.getCurrentRequest();
             String text = a.getDisplayName();
             String base = Functions.getIconFilePath(a);
@@ -89,7 +100,7 @@ public interface ModelObjectWithContextMenu extends ModelObject {
 
             return add(url,icon,text);
         }
-        
+
         public ContextMenu add(String url, String icon, String text) {
             if (text != null && icon != null && url != null)
                 items.add(new MenuItem(url,icon,text));
@@ -106,12 +117,70 @@ public interface ModelObjectWithContextMenu extends ModelObject {
             return this;
         }
 
+        /** @since 1.512 */
+        public ContextMenu add(String url, String icon, String text, boolean post, boolean requiresConfirmation) {
+            if (text != null && icon != null && url != null) {
+                MenuItem item = new MenuItem(url,icon,text);
+                item.post = post;
+                item.requiresConfirmation = requiresConfirmation;
+                items.add(item);
+            }
+            return this;
+        }
+
+        /**
+         * Adds a manually constructed {@link MenuItem}
+         *
+         * @since 1.513
+         */
+        public ContextMenu add(MenuItem item) {
+            items.add(item);
+            return this;
+        }
+
+        /**
+         * Adds a node
+         *
+         * @since 1.513
+         */
+        public ContextMenu add(Node n) {
+            Computer c = n.toComputer();
+            return add(new MenuItem()
+                .withDisplayName(n.getDisplayName())
+                .withStockIcon((c==null) ? "computer.png" : c.getIcon())
+                .withContextRelativeUrl(n.getSearchUrl()));
+        }
+
+        /**
+         * Adds a computer
+         *
+         * @since 1.513
+         */
+        public ContextMenu add(Computer c) {
+            return add(new MenuItem()
+                .withDisplayName(c.getDisplayName())
+                .withStockIcon(c.getIcon())
+                .withContextRelativeUrl(c.getUrl()));
+        }
+
+        /**
+         * Adds a child item when rendering context menu of its parent.
+         *
+         * @since 1.513
+         */
+        public ContextMenu add(Job job) {
+            return add(new MenuItem()
+                .withDisplayName(job.getDisplayName())
+                .withIcon(job.getIconColor())
+                .withUrl(job.getSearchUrl()));
+        }
+
         /**
          * Default implementation of the context menu generation.
          * 
          * <p>
          * This method uses {@code sidepanel.groovy} to run the side panel generation, captures
-         * the use of &lt;l:task> tags, and then converts those into {@link MenuItem}s. This is
+         * the use of {@code <l:task>} tags, and then converts those into {@link MenuItem}s. This is
          * supposed to make this work with most existing {@link ModelObject}s that follow the standard
          * convention.
          * 
@@ -145,7 +214,7 @@ public interface ModelObjectWithContextMenu extends ModelObject {
             } else
             if (self instanceof Actionable) {
                 // fallback
-                this.addAll(((Actionable)self).getActions());
+                this.addAll(((Actionable)self).getAllActions());
             }
     
             return this;
@@ -185,19 +254,87 @@ public interface ModelObjectWithContextMenu extends ModelObject {
         @Exported public boolean post;
 
         /**
+         * True to require confirmation after a click.
+         * @since 1.512
+         */
+        @Exported public boolean requiresConfirmation;
+
+        /**
          * If this is a submenu, definition of subitems.
          */
         @Exported(inline=true)
         public ContextMenu subMenu;
 
         public MenuItem(String url, String icon, String displayName) {
+            withUrl(url).withIcon(icon).withDisplayName(displayName);
+        }
+
+        public MenuItem() {
+        }
+
+        public MenuItem withUrl(String url) {
             try {
                 this.url = new URI(Stapler.getCurrentRequest().getRequestURI()).resolve(new URI(url)).toString();
             } catch (URISyntaxException x) {
                 throw new IllegalArgumentException("Bad URI from " + Stapler.getCurrentRequest().getRequestURI() + " vs. " + url, x);
             }
+            return this;
+        }
+
+        /**
+         * Sets the URL by passing in a URL relative to the context path of Jenkins
+         */
+        public MenuItem withContextRelativeUrl(String url) {
+            if (!url.startsWith("/"))   url = '/'+url;
+            this.url = Stapler.getCurrentRequest().getContextPath()+url;
+            return this;
+        }
+
+        public MenuItem withIcon(String icon) {
             this.icon = icon;
+            return this;
+        }
+
+        public MenuItem withIcon(BallColor color) {
+            return withStockIcon(color.getImage());
+        }
+
+        /**
+         * Sets the icon from core's stock icon
+         *
+         * @param icon
+         *      String like "gear.png" that resolves to 24x24 stock icon in the core
+         */
+        public MenuItem withStockIcon(String icon) {
+            this.icon = Stapler.getCurrentRequest().getContextPath() + Jenkins.RESOURCE_PATH + "/images/24x24/"+icon;
+            return this;
+        }
+
+        public MenuItem withDisplayName(String displayName) {
             this.displayName = Util.escape(displayName);
+            return this;
+        }
+
+        public MenuItem withDisplayName(ModelObject o) {
+            return withDisplayName(o.getDisplayName());
         }
     }
+
+    /**
+     * Allows an action to decide whether it will be visible in a context menu.
+     * @since 1.538
+     */
+    interface ContextMenuVisibility extends Action {
+
+        /**
+         * Determines whether to show this action right now.
+         * Can always return false, for an action which should never be in the context menu;
+         * or could examine {@link Stapler#getCurrentRequest}.
+         * @return true to display it, false to hide
+         * @see ContextMenu#add(Action)
+         */
+        boolean isVisible();
+
+    }
+
 }

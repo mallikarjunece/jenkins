@@ -25,7 +25,9 @@
 package hudson.model;
 
 import hudson.Functions;
+import jenkins.util.SystemProperties;
 import hudson.security.PermissionScope;
+import jenkins.util.io.OnMaster;
 import org.kohsuke.stapler.StaplerRequest;
 
 import java.io.IOException;
@@ -35,6 +37,7 @@ import hudson.search.SearchableModelObject;
 import hudson.security.Permission;
 import hudson.security.PermissionGroup;
 import hudson.security.AccessControlled;
+import hudson.util.Secret;
 
 /**
  * Basic configuration unit in Hudson.
@@ -65,7 +68,7 @@ import hudson.security.AccessControlled;
  * @see Items
  * @see ItemVisitor
  */
-public interface Item extends PersistenceRoot, SearchableModelObject, AccessControlled {
+public interface Item extends PersistenceRoot, SearchableModelObject, AccessControlled, OnMaster {
     /**
      * Gets the parent that contains this item.
      */
@@ -176,11 +179,12 @@ public interface Item extends PersistenceRoot, SearchableModelObject, AccessCont
      *      This method is only intended for the remote API clients who cannot resolve relative references
      *      (even this won't work for the same reason, which should be fixed.)
      */
+    @Deprecated
     String getAbsoluteUrl();
 
     /**
      * Called right after when a {@link Item} is loaded from disk.
-     * This is an opporunity to do a post load processing.
+     * This is an opportunity to do a post load processing.
      *
      * @param name
      *      Name of the directory (not a path --- just the name portion) from
@@ -203,7 +207,7 @@ public interface Item extends PersistenceRoot, SearchableModelObject, AccessCont
      *
      * @since 1.374
       */
-    void onCreatedFromScratch();
+    default void onCreatedFromScratch() {}
 
     /**
      * Save the settings to a file.
@@ -224,8 +228,14 @@ public interface Item extends PersistenceRoot, SearchableModelObject, AccessCont
     Permission DELETE = new Permission(PERMISSIONS, "Delete", Messages._Item_DELETE_description(), Permission.DELETE, PermissionScope.ITEM);
     Permission CONFIGURE = new Permission(PERMISSIONS, "Configure", Messages._Item_CONFIGURE_description(), Permission.CONFIGURE, PermissionScope.ITEM);
     Permission READ = new Permission(PERMISSIONS, "Read", Messages._Item_READ_description(), Permission.READ, PermissionScope.ITEM);
-    Permission DISCOVER = new Permission(PERMISSIONS, "Discover", Messages._AbstractProject_DiscoverPermission_Description(), Permission.READ, PermissionScope.ITEM);
-    Permission EXTENDED_READ = new Permission(PERMISSIONS,"ExtendedRead", Messages._AbstractProject_ExtendedReadPermission_Description(), CONFIGURE, Boolean.getBoolean("hudson.security.ExtendedReadPermission"), new PermissionScope[]{PermissionScope.ITEM});
+    Permission DISCOVER = new Permission(PERMISSIONS, "Discover", Messages._AbstractProject_DiscoverPermission_Description(), READ, PermissionScope.ITEM);
+    /**
+     * Ability to view configuration details.
+     * If the user lacks {@link #CONFIGURE} then any {@link Secret}s must be masked out, even in encrypted form.
+     * @see Secret#ENCRYPTED_VALUE_PATTERN
+     */
+    Permission EXTENDED_READ = new Permission(PERMISSIONS,"ExtendedRead", Messages._AbstractProject_ExtendedReadPermission_Description(), CONFIGURE, SystemProperties.getBoolean("hudson.security.ExtendedReadPermission"), new PermissionScope[]{PermissionScope.ITEM});
+    // TODO the following really belong in Job, not Item, but too late to move since the owner.name is encoded in the ID:
     Permission BUILD = new Permission(PERMISSIONS, "Build", Messages._AbstractProject_BuildPermission_Description(),  Permission.UPDATE, PermissionScope.ITEM);
     Permission WORKSPACE = new Permission(PERMISSIONS, "Workspace", Messages._AbstractProject_WorkspacePermission_Description(), Permission.READ, PermissionScope.ITEM);
     Permission WIPEOUT = new Permission(PERMISSIONS, "WipeOut", Messages._AbstractProject_WipeOutPermission_Description(), null, Functions.isWipeOutPermissionEnabled(), new PermissionScope[]{PermissionScope.ITEM});

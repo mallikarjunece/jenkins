@@ -30,24 +30,26 @@ import hudson.EnvVars;
 import hudson.FilePath;
 import hudson.Functions;
 import hudson.Launcher;
-import hudson.Util;
-import hudson.console.AnnotatedLargeText;
-import hudson.console.ExpandableDetailsNote;
+import jenkins.scm.RunWithSCM;
+import jenkins.util.SystemProperties;
 import hudson.console.ModelHyperlinkNote;
-import hudson.matrix.MatrixConfiguration;
 import hudson.model.Fingerprint.BuildPtr;
 import hudson.model.Fingerprint.RangeSet;
-import hudson.model.PermalinkProjectAction.Permalink;
+import hudson.model.labels.LabelAtom;
 import hudson.model.listeners.RunListener;
 import hudson.model.listeners.SCMListener;
+import hudson.remoting.ChannelClosedException;
+import hudson.remoting.RequestAbortedException;
 import hudson.scm.ChangeLogParser;
 import hudson.scm.ChangeLogSet;
 import hudson.scm.ChangeLogSet.Entry;
 import hudson.scm.NullChangeLogParser;
 import hudson.scm.SCM;
+import hudson.scm.SCMRevisionState;
 import hudson.slaves.NodeProperty;
 import hudson.slaves.WorkspaceList;
 import hudson.slaves.WorkspaceList.Lease;
+import hudson.slaves.OfflineCause;
 import hudson.tasks.BuildStep;
 import hudson.tasks.BuildStepMonitor;
 import hudson.tasks.BuildTrigger;
@@ -55,13 +57,8 @@ import hudson.tasks.BuildWrapper;
 import hudson.tasks.Builder;
 import hudson.tasks.Fingerprinter.FingerprintAction;
 import hudson.tasks.Publisher;
-import hudson.tasks.test.AbstractTestResultAction;
-import hudson.tasks.test.AggregatedTestResultAction;
 import hudson.util.*;
 import jenkins.model.Jenkins;
-import jenkins.model.PeepholePermalink;
-import jenkins.model.lazy.AbstractLazyLoadRunMap.Direction;
-import jenkins.model.lazy.BuildReference;
 import org.kohsuke.stapler.HttpResponse;
 import org.kohsuke.stapler.Stapler;
 import org.kohsuke.stapler.StaplerRequest;
@@ -73,10 +70,7 @@ import javax.servlet.ServletException;
 import java.io.File;
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.io.StringWriter;
 import java.lang.ref.WeakReference;
-import java.text.MessageFormat;
-import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collection;
@@ -90,7 +84,13 @@ import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
 import org.kohsuke.stapler.interceptor.RequirePOST;
+
+import static java.util.logging.Level.WARNING;
+
+import jenkins.model.lazy.BuildReference;
+import jenkins.model.lazy.LazyBuildMixIn;
 
 /**
  * Base implementation of {@link Run}s that build software.
@@ -100,15 +100,15 @@ import org.kohsuke.stapler.interceptor.RequirePOST;
  * @author Kohsuke Kawaguchi
  * @see AbstractProject
  */
-public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends AbstractBuild<P,R>> extends Run<P,R> implements Queue.Executable {
+public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends AbstractBuild<P,R>> extends Run<P,R> implements Queue.Executable, LazyBuildMixIn.LazyLoadingRun<P,R>, RunWithSCM<P,R> {
 
     /**
      * Set if we want the blame information to flow from upstream to downstream build.
      */
-    private static final boolean upstreamCulprits = Boolean.getBoolean("hudson.upstreamCulprits");
+    private static final boolean upstreamCulprits = SystemProperties.getBoolean("hudson.upstreamCulprits");
 
     /**
-     * Name of the slave this project was built on.
+     * Name of the agent this project was built on.
      * Null or "" if built by the master. (null happens when we read old record that didn't have this information.)
      */
     private String builtOn;
@@ -126,7 +126,6 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
 
     /**
      * SCM used for this build.
-     * Maybe null, for historical reason, in which case CVS is assumed.
      */
     private ChangeLogParser scm;
 
@@ -151,24 +150,16 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
     private volatile Set<String> culprits;
 
     /**
-     * During the build this field remembers {@link BuildWrapper.Environment}s created by
+     * During the build this field remembers {@link hudson.tasks.BuildWrapper.Environment}s created by
      * {@link BuildWrapper}. This design is bit ugly but forced due to compatibility.
      */
     protected transient List<Environment> buildEnvironments;
 
-    /**
-     * Pointers to form bi-directional link between adjacent {@link AbstractBuild}s.
-     *
-     * <p>
-     * Unlike {@link Run}, {@link AbstractBuild}s do lazy-loading, so we don't use
-     * {@link Run#previousBuild} and {@link Run#nextBuild}, and instead use these
-     * fields and point to {@link #selfReference} of adjacent builds.
-     */
-    private volatile transient BuildReference<R> previousBuild, nextBuild;
-
-    /*package*/ final transient BuildReference<R> selfReference = new BuildReference<R>(getId(),_this());
-
-
+    private transient final LazyBuildMixIn.RunMixIn<P,R> runMixIn = new LazyBuildMixIn.RunMixIn<P,R>() {
+        @Override protected R asRun() {
+            return _this();
+        }
+    };
 
     protected AbstractBuild(P job) throws IOException {
         super(job);
@@ -186,91 +177,33 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         return getParent();
     }
 
-    @Override
-    void dropLinks() {
-        super.dropLinks();
+    @Override public final LazyBuildMixIn.RunMixIn<P,R> getRunMixIn() {
+        return runMixIn;
+    }
 
-        if(nextBuild!=null) {
-            AbstractBuild nb = nextBuild.get();
-            if (nb!=null) {
-                // remove the oldest build
-                if (previousBuild == selfReference) 
-                    nb.previousBuild = nextBuild;
-                else 
-                    nb.previousBuild = previousBuild;
-            }
-        }
-        if(previousBuild!=null) {
-            AbstractBuild pb = previousBuild.get();
-            if (pb!=null)   pb.nextBuild = nextBuild;
-        }
+    @Override protected final BuildReference<R> createReference() {
+        return getRunMixIn().createReference();
+    }
+
+    @Override protected final void dropLinks() {
+        getRunMixIn().dropLinks();
     }
 
     @Override
     public R getPreviousBuild() {
-        while (true) {
-            BuildReference<R> r = previousBuild;    // capture the value once
-
-            if (r==null) {
-                // having two neighbors pointing to each other is important to make RunMap.removeValue work
-                R pb = getParent().builds.search(number-1, Direction.DESC);
-                if (pb!=null) {
-                    ((AbstractBuild)pb).nextBuild = selfReference;   // establish bi-di link
-                    this.previousBuild = pb.selfReference;
-                    return pb;
-                } else {
-                    // this indicates that we know there's no previous build
-                    // (as opposed to we don't know if/what our previous build is.
-                    this.previousBuild = selfReference;
-                    return null;
-                }
-            }
-            if (r==selfReference)
-                return null;
-
-            R referent = r.get();
-            if (referent!=null) return referent;
-
-            // the reference points to a GC-ed object, drop the reference and do it again
-            this.previousBuild = null;
-        }
+        return getRunMixIn().getPreviousBuild();
     }
 
     @Override
     public R getNextBuild() {
-        while (true) {
-            BuildReference<R> r = nextBuild;    // capture the value once
-
-            if (r==null) {
-                // having two neighbors pointing to each other is important to make RunMap.removeValue work
-                R nb = getParent().builds.search(number+1, Direction.ASC);
-                if (nb!=null) {
-                    ((AbstractBuild)nb).previousBuild = selfReference;   // establish bi-di link
-                    this.nextBuild = nb.selfReference;
-                    return nb;
-                } else {
-                    // this indicates that we know there's no next build
-                    // (as opposed to we don't know if/what our next build is.
-                    this.nextBuild = selfReference;
-                    return null;
-                }
-            }
-            if (r==selfReference)
-                return null;
-
-            R referent = r.get();
-            if (referent!=null) return referent;
-
-            // the reference points to a GC-ed object, drop the reference and do it again
-            this.nextBuild = null;
-        }
+        return getRunMixIn().getNextBuild();
     }
 
     /**
      * Returns a {@link Slave} on which this build was done.
      *
      * @return
-     *      null, for example if the slave that this build run no longer exists.
+     *      null, for example if the agent that this build run no longer exists.
      */
     public @CheckForNull Node getBuiltOn() {
         if (builtOn==null || builtOn.equals(""))
@@ -280,7 +213,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
     }
 
     /**
-     * Returns the name of the slave it was built on; null or "" if built by the master.
+     * Returns the name of the agent it was built on; null or "" if built by the master.
      * (null happens when we read old record that didn't have this information.)
      */
     @Exported(name="builtOn")
@@ -341,7 +274,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
      * {@link AbstractBuildExecution#decideWorkspace(Node,WorkspaceList)}.
      *
      * @return
-     *      null if the workspace is on a slave that's not connected. Note that once the build is completed,
+     *      null if the workspace is on an agent that's not connected. Note that once the build is completed,
      *      the workspace may be used to build something else, so the value returned from this method may
      *      no longer show a workspace as it was used for this build.
      * @since 1.319
@@ -354,10 +287,10 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
     }
 
     /**
-     * Normally, a workspace is assigned by {@link RunExecution}, but this lets you set the workspace in case
+     * Normally, a workspace is assigned by {@link hudson.model.Run.RunExecution}, but this lets you set the workspace in case
      * {@link AbstractBuild} is created without a build.
      */
-    protected void setWorkspace(FilePath ws) {
+    protected void setWorkspace(@Nonnull FilePath ws) {
         this.workspace = ws.getRemote();
     }
 
@@ -386,80 +319,44 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         return getParent().getScm().getModuleRoots(ws, this);
     }
 
-    /**
-     * List of users who committed a change since the last non-broken build till now.
-     *
-     * <p>
-     * This list at least always include people who made changes in this build, but
-     * if the previous build was a failure it also includes the culprit list from there.
-     *
-     * @return
-     *      can be empty but never null.
-     */
-    @Exported
-    public Set<User> getCulprits() {
-        if (culprits==null) {
-            Set<User> r = new HashSet<User>();
-            R p = getPreviousCompletedBuild();
-            if (p !=null && isBuilding()) {
-                Result pr = p.getResult();
-                if (pr!=null && pr.isWorseThan(Result.SUCCESS)) {
-                    // we are still building, so this is just the current latest information,
-                    // but we seems to be failing so far, so inherit culprits from the previous build.
-                    // isBuilding() check is to avoid recursion when loading data from old Hudson, which doesn't record
-                    // this information
-                    r.addAll(p.getCulprits());
-                }
-            }
-            for (Entry e : getChangeSet())
-                r.add(e.getAuthor());
+    @Override
+    @CheckForNull public Set<String> getCulpritIds() {
+        return culprits;
+    }
 
-            if (upstreamCulprits) {
-                // If we have dependencies since the last successful build, add their authors to our list
-                if (getPreviousNotFailedBuild() != null) {
-                    Map <AbstractProject,AbstractBuild.DependencyChange> depmap = getDependencyChanges(getPreviousSuccessfulBuild());
-                    for (AbstractBuild.DependencyChange dep : depmap.values()) {
-                        for (AbstractBuild<?,?> b : dep.getBuilds()) {
-                            for (Entry entry : b.getChangeSet()) {
-                                r.add(entry.getAuthor());
-                            }
+    @Override
+    @Exported
+    @Nonnull public Set<User> getCulprits() {
+        return RunWithSCM.super.getCulprits();
+    }
+
+    @Override
+    public boolean shouldCalculateCulprits() {
+        return getCulpritIds() == null;
+    }
+
+    @Override
+    @Nonnull
+    public Set<User> calculateCulprits() {
+        Set<User> c = RunWithSCM.super.calculateCulprits();
+
+        AbstractBuild<P,R> p = getPreviousCompletedBuild();
+        if (upstreamCulprits) {
+            // If we have dependencies since the last successful build, add their authors to our list
+            if (p != null && p.getPreviousNotFailedBuild() != null) {
+                Map<AbstractProject, AbstractBuild.DependencyChange> depmap =
+                        p.getDependencyChanges(p.getPreviousSuccessfulBuild());
+                for (AbstractBuild.DependencyChange dep : depmap.values()) {
+                    for (AbstractBuild<?, ?> b : dep.getBuilds()) {
+                        for (ChangeLogSet.Entry entry : b.getChangeSet()) {
+                            c.add(entry.getAuthor());
                         }
                     }
                 }
             }
-
-            return r;
         }
 
-        return new AbstractSet<User>() {
-            public Iterator<User> iterator() {
-                return new AdaptedIterator<String,User>(culprits.iterator()) {
-                    protected User adapt(String id) {
-                        return User.get(id);
-                    }
-                };
-            }
-
-            public int size() {
-                return culprits.size();
-            }
-        };
-    }
-
-    /**
-     * Returns true if this user has made a commit to this build.
-     *
-     * @since 1.191
-     */
-    public boolean hasParticipant(User user) {
-        for (ChangeLogSet.Entry e : getChangeSet())
-            try{
-                if (e.getAuthor()==user)
-                    return true;
-            } catch (RuntimeException re) { 
-                LOGGER.log(Level.INFO, "Failed to determine author of changelog " + e.getCommitId() + "for " + getParent().getDisplayName() + ", " + getDisplayName(), re);
-            }
-        return false;
+        return c;
     }
 
     /**
@@ -472,26 +369,10 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
     }
 
     /**
-     * Backward compatibility.
-     *
-     * We used to have $JENKINS_HOME/jobs/JOBNAME/lastStable and lastSuccessful symlinked to the appropriate
-     * builds, but now those are done in {@link PeepholePermalink}. So here, we simply create symlinks that
-     * resolves to the symlink created by {@link PeepholePermalink}.
-     */
-    private void createSymlink(TaskListener listener, String name, Permalink target) throws InterruptedException {
-        String targetDir;
-        if (getProject().getBuildDir().equals(new File(getProject().getRootDir(), "builds"))) {
-            targetDir = "builds/" + target.getId();
-        } else {
-            targetDir = getProject().getBuildDir()+"/"+target.getId();
-        }
-        Util.createSymlink(getProject().getRootDir(), targetDir, name, listener);
-    }
-
-    /**
      * @deprecated as of 1.467
-     *      Please use {@link RunExecution}
+     *      Please use {@link hudson.model.Run.RunExecution}
      */
+    @Deprecated
     public abstract class AbstractRunner extends AbstractBuildExecution {
 
     }
@@ -514,10 +395,26 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         protected BuildListener listener;
 
         /**
-         * Returns the current {@link Node} on which we are building.
+         * Lease of the workspace.
          */
-        protected final Node getCurrentNode() {
-            return Executor.currentExecutor().getOwner().getNode();
+        private Lease lease;
+
+        /**
+         * Returns the current {@link Node} on which we are building.
+         * @return Returns the current {@link Node}
+         * @throws IllegalStateException if that cannot be determined
+         */
+        protected final @Nonnull Node getCurrentNode() throws IllegalStateException {
+            Executor exec = Executor.currentExecutor();
+            if (exec == null) {
+                throw new IllegalStateException("not being called from an executor thread");
+            }
+            Computer c = exec.getOwner();
+            Node node = c.getNode();
+            if (node == null) {
+                throw new IllegalStateException("no longer a configured node for " + c.getName());
+            }
+            return node;
         }
 
         public Launcher getLauncher() {
@@ -536,7 +433,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
          * @param wsl
          *      Passed in for the convenience. The returned path must be registered to this object.
          */
-        protected Lease decideWorkspace(Node n, WorkspaceList wsl) throws InterruptedException, IOException {
+        protected Lease decideWorkspace(@Nonnull Node n, WorkspaceList wsl) throws InterruptedException, IOException {
             String customWorkspace = getProject().getCustomWorkspace();
             if (customWorkspace != null) {
                 // we allow custom workspaces to be concurrently used between jobs.
@@ -546,72 +443,71 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
             return wsl.allocate(n.getWorkspaceFor((TopLevelItem)getProject()), getBuild());
         }
 
-        public Result run(BuildListener listener) throws Exception {
-            Node node = getCurrentNode();
+        public Result run(@Nonnull BuildListener listener) throws Exception {
+            final Node node = getCurrentNode();
+            
             assert builtOn==null;
             builtOn = node.getNodeName();
             hudsonVersion = Jenkins.VERSION;
             this.listener = listener;
 
             launcher = createLauncher(listener);
-            if (!Jenkins.getInstance().getNodes().isEmpty())
-                listener.getLogger().print(node instanceof Jenkins ? Messages.AbstractBuild_BuildingOnMaster() : 
-                    Messages.AbstractBuild_BuildingRemotely(ModelHyperlinkNote.encodeTo("/computer/" + builtOn, builtOn)));
-            else
-            	listener.getLogger().print(Messages.AbstractBuild_Building());
-            
-            final Lease lease = decideWorkspace(node,Computer.currentComputer().getWorkspaceList());
-
-            try {
-                workspace = lease.path.getRemote();
-                listener.getLogger().println(Messages.AbstractBuild_BuildingInWorkspace(workspace));
-                node.getFileSystemProvisioner().prepareWorkspace(AbstractBuild.this,lease.path,listener);
-                
-                for (WorkspaceListener wl : WorkspaceListener.all()) {
-                    wl.beforeUse(AbstractBuild.this, lease.path, listener);
-                }
-
-                getProject().getScmCheckoutStrategy().preCheckout(AbstractBuild.this, launcher, this.listener);
-                getProject().getScmCheckoutStrategy().checkout(this);
-
-                if (!preBuild(listener,project.getProperties()))
-                    return Result.FAILURE;
-
-                Result result = doRun(listener);
-
-                Computer c = node.toComputer();
-                if (c==null || c.isOffline()) {
-                    // As can be seen in HUDSON-5073, when a build fails because of the slave connectivity problem,
-                    // error message doesn't point users to the slave. So let's do it here.
-                    listener.hyperlink("/computer/"+builtOn+"/log","Looks like the node went offline during the build. Check the slave log for the details.");
-
-                    if (c != null) {
-                        // grab the end of the log file. This might not work very well if the slave already
-                        // starts reconnecting. Fixing this requires a ring buffer in slave logs.
-                        AnnotatedLargeText<Computer> log = c.getLogText();
-                        StringWriter w = new StringWriter();
-                        log.writeHtmlTo(Math.max(0,c.getLogFile().length()-10240),w);
-
-                        listener.getLogger().print(ExpandableDetailsNote.encodeTo("details",w.toString()));
-                        listener.getLogger().println();
+            if (!Jenkins.getInstance().getNodes().isEmpty()) {
+                if (node instanceof Jenkins) {
+                    listener.getLogger().print(Messages.AbstractBuild_BuildingOnMaster());
+                } else {
+                    listener.getLogger().print(Messages.AbstractBuild_BuildingRemotely(ModelHyperlinkNote.encodeTo("/computer/" + builtOn, builtOn)));
+                    Set<LabelAtom> assignedLabels = new HashSet<LabelAtom>(node.getAssignedLabels());
+                    assignedLabels.remove(node.getSelfLabel());
+                    if (!assignedLabels.isEmpty()) {
+                        boolean first = true;
+                        for (LabelAtom label : assignedLabels) {
+                            if (first) {
+                                listener.getLogger().print(" (");
+                                first = false;
+                            } else {
+                                listener.getLogger().print(' ');
+                            }
+                            listener.getLogger().print(label.getName());
+                        }
+                        listener.getLogger().print(')');
                     }
                 }
+            } else {
+                listener.getLogger().print(Messages.AbstractBuild_Building());
+            }
+            
+            lease = decideWorkspace(node, Computer.currentComputer().getWorkspaceList());
 
+            workspace = lease.path.getRemote();
+            listener.getLogger().println(Messages.AbstractBuild_BuildingInWorkspace(workspace));
+            node.getFileSystemProvisioner().prepareWorkspace(AbstractBuild.this,lease.path,listener);
+
+            for (WorkspaceListener wl : WorkspaceListener.all()) {
+                wl.beforeUse(AbstractBuild.this, lease.path, listener);
+            }
+
+            getProject().getScmCheckoutStrategy().preCheckout(AbstractBuild.this, launcher, this.listener);
+            getProject().getScmCheckoutStrategy().checkout(this);
+
+            if (!preBuild(listener,project.getProperties()))
+                return Result.FAILURE;
+
+            Result result = doRun(listener);
+
+            if (node.getChannel() != null) {
                 // kill run-away processes that are left
                 // use multiple environment variables so that people can escape this massacre by overriding an environment
                 // variable for some processes
                 launcher.kill(getCharacteristicEnvVars());
-
-                // this is ugly, but for historical reason, if non-null value is returned
-                // it should become the final result.
-                if (result==null)    result = getResult();
-                if (result==null)    result = Result.SUCCESS;
-
-                return result;
-            } finally {
-                lease.release();
-                this.listener = null;
             }
+
+            // this is ugly, but for historical reason, if non-null value is returned
+            // it should become the final result.
+            if (result==null)    result = getResult();
+            if (result==null)    result = Result.SUCCESS;
+
+            return result;
         }
 
         /**
@@ -621,8 +517,10 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
          * @param listener
          *      Always non-null. Connected to the main build output.
          */
-        protected Launcher createLauncher(BuildListener listener) throws IOException, InterruptedException {
-            Launcher l = getCurrentNode().createLauncher(listener);
+        @Nonnull
+        protected Launcher createLauncher(@Nonnull BuildListener listener) throws IOException, InterruptedException {
+            final Node currentNode = getCurrentNode();
+            Launcher l = currentNode.createLauncher(listener);
 
             if (project instanceof BuildableItemWithBuildWrappers) {
                 BuildableItemWithBuildWrappers biwbw = (BuildableItemWithBuildWrappers) project;
@@ -646,7 +544,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
                 }
             }
 
-            for (NodeProperty nodeProperty: Computer.currentComputer().getNode().getNodeProperties()) {
+            for (NodeProperty nodeProperty: currentNode.getNodeProperties()) {
                 Environment environment = nodeProperty.setUp(AbstractBuild.this, l, listener);
                 if (environment != null) {
                     buildEnvironments.add(environment);
@@ -661,25 +559,34 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
             AbstractProject<?, ?> project = build.getProject();
 
             for (int retryCount=project.getScmCheckoutRetryCount(); ; retryCount--) {
-                // for historical reasons, null in the scm field means CVS, so we need to explicitly set this to something
-                // in case check out fails and leaves a broken changelog.xml behind.
-                // see http://www.nabble.com/CVSChangeLogSet.parse-yields-SAXParseExceptions-when-parsing-bad-*AccuRev*-changelog.xml-files-td22213663.html
                 build.scm = NullChangeLogParser.INSTANCE;
 
                 try {
-                    if (project.checkout(build,launcher,listener,new File(build.getRootDir(),"changelog.xml"))) {
+                    File changeLogFile = new File(build.getRootDir(), "changelog.xml");
+                    if (project.checkout(build, launcher,listener, changeLogFile)) {
                         // check out succeeded
                         SCM scm = project.getScm();
+                        for (SCMListener l : SCMListener.all()) {
+                            try {
+                                l.onCheckout(build, scm, build.getWorkspace(), listener, changeLogFile, build.getAction(SCMRevisionState.class));
+                            } catch (Exception e) {
+                                throw new IOException(e);
+                            }
+                        }
 
                         build.scm = scm.createChangeLogParser();
                         build.changeSet = new WeakReference<ChangeLogSet<? extends Entry>>(build.calcChangeSet());
 
-                        for (SCMListener l : Jenkins.getInstance().getSCMListeners())
+                        for (SCMListener l : SCMListener.all())
                             try {
                                 l.onChangeLogParsed(build,listener,build.getChangeSet());
                             } catch (Exception e) {
-                                throw new IOException2("Failed to parse changelog",e);
+                                throw new IOException("Failed to parse changelog",e);
                             }
+
+                        // Get a chance to do something after checkout and changelog is done
+                        scm.postCheckout( build, launcher, build.getWorkspace(), listener );
+
                         return;
                     }
                 } catch (AbortException e) {
@@ -688,7 +595,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
                     throw (InterruptedException)new InterruptedException().initCause(e);
                 } catch (IOException e) {
                     // checkout error not yet reported
-                    e.printStackTrace(listener.getLogger());
+                    Functions.printStackTrace(e, listener.getLogger());
                 }
 
                 if (retryCount == 0)   // all attempts failed
@@ -718,9 +625,6 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         public final void post(BuildListener listener) throws Exception {
             try {
                 post2(listener);
-
-                createSymlink(listener, "lastSuccessful", Permalink.LAST_SUCCESSFUL_BUILD);
-                createSymlink(listener, "lastStable", Permalink.LAST_STABLE_BUILD);
             } finally {
                 // update the culprit list
                 HashSet<String> r = new HashSet<String>();
@@ -732,6 +636,10 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         }
 
         public void cleanUp(BuildListener listener) throws Exception {
+            if (lease!=null) {
+                lease.release();
+                lease = null;
+            }
             BuildTrigger.execute(AbstractBuild.this, listener);
             buildEnvironments = null;
         }
@@ -740,6 +648,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
          * @deprecated as of 1.356
          *      Use {@link #performAllBuildSteps(BuildListener, Map, boolean)}
          */
+       @Deprecated
         protected final void performAllBuildStep(BuildListener listener, Map<?,? extends BuildStep> buildSteps, boolean phase) throws InterruptedException, IOException {
             performAllBuildSteps(listener,buildSteps.values(),phase);
         }
@@ -752,6 +661,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
          * @deprecated as of 1.356
          *      Use {@link #performAllBuildSteps(BuildListener, Iterable, boolean)}
          */
+        @Deprecated
         protected final void performAllBuildStep(BuildListener listener, Iterable<? extends BuildStep> buildSteps, boolean phase) throws InterruptedException, IOException {
             performAllBuildSteps(listener,buildSteps,phase);
         }
@@ -761,6 +671,8 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
          *
          * @param phase
          *      true for the post build processing, and false for the final "run after finished" execution.
+         *
+         * @return false if any build step failed
          */
         protected final boolean performAllBuildSteps(BuildListener listener, Iterable<? extends BuildStep> buildSteps, boolean phase) throws InterruptedException, IOException {
             boolean r = true;
@@ -768,34 +680,70 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
                 if ((bs instanceof Publisher && ((Publisher)bs).needsToRunAfterFinalized()) ^ phase)
                     try {
                         if (!perform(bs,listener)) {
-                            LOGGER.fine(MessageFormat.format("{0} : {1} failed", AbstractBuild.this.toString(), bs));
+                            LOGGER.log(Level.FINE, "{0} : {1} failed", new Object[] {AbstractBuild.this, bs});
                             r = false;
+                            if (phase) {
+                                setResult(Result.FAILURE);
+                            }
                         }
                     } catch (Exception e) {
-                        String msg = "Publisher " + bs.getClass().getName() + " aborted due to exception";
-                        e.printStackTrace(listener.error(msg));
-                        LOGGER.log(Level.WARNING, msg, e);
-                        setResult(Result.FAILURE);
+                        reportError(bs, e, listener, phase);
+                        r = false;
+                    } catch (LinkageError e) {
+                        reportError(bs, e, listener, phase);
+                        r = false;
                     }
             }
             return r;
+        }
+
+        private void reportError(BuildStep bs, Throwable e, BuildListener listener, boolean phase) {
+            final String buildStep;
+
+            if (bs instanceof Describable) {
+                buildStep = ((Describable) bs).getDescriptor().getDisplayName();
+            } else {
+                buildStep = bs.getClass().getName();
+            }
+
+            if (e instanceof AbortException) {
+                LOGGER.log(Level.FINE, "{0} : {1} failed", new Object[] {AbstractBuild.this, buildStep});
+                listener.error("Step ‘" + buildStep + "’ failed: " + e.getMessage());
+            } else {
+                String msg = "Step ‘" + buildStep + "’ aborted due to exception: ";
+                Functions.printStackTrace(e, listener.error(msg));
+                LOGGER.log(WARNING, msg, e);
+            }
+
+            if (phase) {
+                setResult(Result.FAILURE);
+            }
         }
 
         /**
          * Calls a build step.
          */
         protected final boolean perform(BuildStep bs, BuildListener listener) throws InterruptedException, IOException {
-            BuildStepMonitor mon;
-            try {
-                mon = bs.getRequiredMonitorService();
-            } catch (AbstractMethodError e) {
-                mon = BuildStepMonitor.BUILD;
-            }
+            BuildStepMonitor mon = bs.getRequiredMonitorService();
             Result oldResult = AbstractBuild.this.getResult();
             for (BuildStepListener bsl : BuildStepListener.all()) {
                 bsl.started(AbstractBuild.this, bs, listener);
             }
-            boolean canContinue = mon.perform(bs, AbstractBuild.this, launcher, listener);
+
+            boolean canContinue = false;
+            try {
+
+                canContinue = mon.perform(bs, AbstractBuild.this, launcher, listener);
+            } catch (RequestAbortedException ex) {
+                // Channel is closed, do not continue
+                reportBrokenChannel(listener);
+            } catch (ChannelClosedException ex) {
+                // Channel is closed, do not continue
+                reportBrokenChannel(listener);
+            } catch (RuntimeException ex) {
+                Functions.printStackTrace(ex, listener.error("Build step failed with exception"));
+            }
+
             for (BuildStepListener bsl : BuildStepListener.all()) {
                 bsl.finished(AbstractBuild.this, bs, listener, canContinue);
             }
@@ -809,6 +757,16 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
                 listener.getLogger().format("Build step '%s' marked build as failure%n", buildStepName);
             }
             return canContinue;
+        }
+
+        private void reportBrokenChannel(BuildListener listener) throws IOException {
+            final Node node = getCurrentNode();
+            listener.hyperlink("/" + node.toComputer().getUrl() + "log", "Agent went offline during the build");
+            listener.getLogger().println();
+            final OfflineCause offlineCause = node.toComputer().getOfflineCause();
+            if (offlineCause != null) {
+                listener.error(offlineCause.toString());
+            }
         }
 
         private String getBuildStepName(BuildStep bs) {
@@ -830,7 +788,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         protected final boolean preBuild(BuildListener listener,Iterable<? extends BuildStep> steps) {
             for (BuildStep bs : steps)
                 if (!bs.prebuild(AbstractBuild.this,listener)) {
-                    LOGGER.fine(MessageFormat.format("{0} : {1} failed", AbstractBuild.this.toString(), bs));
+                    LOGGER.log(Level.FINE, "{0} : {1} failed", new Object[] {AbstractBuild.this, bs});
                     return false;
                 }
             return true;
@@ -852,7 +810,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
     }
 
 	/*
-     * No need to to lock the entire AbstractBuild on change set calculcation
+     * No need to lock the entire AbstractBuild on change set calculation
      */
     private transient Object changeSetLock = new Object();
     
@@ -862,23 +820,10 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
      * @return never null.
      */
     @Exported
-    public ChangeLogSet<? extends Entry> getChangeSet() {
+    @Nonnull public ChangeLogSet<? extends Entry> getChangeSet() {
         synchronized (changeSetLock) {
             if (scm==null) {
-                // for historical reason, null means CVS.
-                try {
-                    Class<?> c = Jenkins.getInstance().getPluginManager().uberClassLoader.loadClass("hudson.scm.CVSChangeLogParser");
-                    scm = (ChangeLogParser)c.newInstance();
-                } catch (ClassNotFoundException e) {
-                    // if CVS isn't available, fall back to something non-null.
-                    scm = NullChangeLogParser.INSTANCE;
-                } catch (InstantiationException e) {
-                    scm = NullChangeLogParser.INSTANCE;
-                    throw (Error)new InstantiationError().initCause(e);
-                } catch (IllegalAccessException e) {
-                    scm = NullChangeLogParser.INSTANCE;
-                    throw (Error)new IllegalAccessError().initCause(e);
-                }
+                scm = NullChangeLogParser.INSTANCE;                
             }
         }
 
@@ -899,6 +844,12 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         return cs;
     }
 
+    @Override
+    @Nonnull public List<ChangeLogSet<? extends ChangeLogSet.Entry>> getChangeSets() {
+        ChangeLogSet<? extends Entry> cs = getChangeSet();
+        return cs.isEmptySet() ? Collections.emptyList() : Collections.singletonList(cs);
+    }
+
     /**
      * Returns true if the changelog is already computed.
      */
@@ -915,9 +866,9 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         try {
             return scm.parse(this,changelogFile);
         } catch (IOException e) {
-            e.printStackTrace();
+            LOGGER.log(WARNING, "Failed to parse "+changelogFile,e);
         } catch (SAXException e) {
-            e.printStackTrace();
+            LOGGER.log(WARNING, "Failed to parse "+changelogFile,e);
         }
         return ChangeLogSet.createEmpty(this);
     }
@@ -935,7 +886,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
             for (Environment e : buildEnvironments)
                 e.buildEnvVars(env);
 
-        for (EnvironmentContributingAction a : Util.filter(getActions(),EnvironmentContributingAction.class))
+        for (EnvironmentContributingAction a : getActions(EnvironmentContributingAction.class))
             a.buildEnvVars(this,env);
 
         EnvVars.resolve(env);
@@ -968,7 +919,16 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
     public Calendar due() {
         return getTimestamp();
     }
+
+    /**
+     * {@inheritDoc}
+     * The action may have a {@code summary.jelly} view containing a {@code <t:summary>} or other {@code <tr>}.
+     */
+    @Override public void addAction(Action a) {
+        super.addAction(a);
+    }
       
+    @SuppressWarnings("deprecation")
     public List<Action> getPersistentActions(){
         return super.getActions();
     }
@@ -1007,7 +967,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
      * Provides additional variables and their values to {@link Builder}s.
      *
      * <p>
-     * This mechanism is used by {@link MatrixConfiguration} to pass
+     * This mechanism is used by {@code MatrixConfiguration} to pass
      * the configuration values to the current build. It is up to
      * {@link Builder}s to decide whether they want to recognize the values
      * or how to use them.
@@ -1050,17 +1010,27 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
     }
 
     /**
-     * Gets {@link AbstractTestResultAction} associated with this build if any.
+     * @deprecated Use {@link #getAction(Class)} on {@code AbstractTestResultAction}.
      */
-    public AbstractTestResultAction getTestResultAction() {
-        return getAction(AbstractTestResultAction.class);
+    @Deprecated
+    public Action getTestResultAction() {
+        try {
+            return getAction(Jenkins.getInstance().getPluginManager().uberClassLoader.loadClass("hudson.tasks.test.AbstractTestResultAction").asSubclass(Action.class));
+        } catch (ClassNotFoundException x) {
+            return null;
+        }
     }
 
     /**
-     * Gets {@link AggregatedTestResultAction} associated with this build if any.
+     * @deprecated Use {@link #getAction(Class)} on {@code AggregatedTestResultAction}.
      */
-    public AggregatedTestResultAction getAggregatedTestResultAction() {
-        return getAction(AggregatedTestResultAction.class);
+    @Deprecated
+    public Action getAggregatedTestResultAction() {
+        try {
+            return getAction(Jenkins.getInstance().getPluginManager().uberClassLoader.loadClass("hudson.tasks.test.AggregatedTestResultAction").asSubclass(Action.class));
+        } catch (ClassNotFoundException x) {
+            return null;
+        }
     }
 
     /**
@@ -1312,7 +1282,7 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
         public List<AbstractBuild> getBuilds() {
             List<AbstractBuild> r = new ArrayList<AbstractBuild>();
 
-            AbstractBuild<?,?> b = (AbstractBuild)project.getNearestBuild(fromId);
+            AbstractBuild<?,?> b = project.getNearestBuild(fromId);
             if (b!=null && b.getNumber()==fromId)
                 b = b.getNextBuild(); // fromId exclusive
 
@@ -1333,6 +1303,8 @@ public abstract class AbstractBuild<P extends AbstractProject<P,R>,R extends Abs
      * @deprecated as of 1.489
      *      Use {@link #doStop()}
      */
+    @Deprecated
+    @RequirePOST // #doStop() should be preferred, but better to be safe
     public void doStop(StaplerRequest req, StaplerResponse rsp) throws IOException, ServletException {
         doStop().generateResponse(req,rsp,this);
     }

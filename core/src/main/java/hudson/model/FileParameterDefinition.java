@@ -23,17 +23,18 @@
  */
 package hudson.model;
 
-import net.sf.json.JSONObject;
-import org.kohsuke.stapler.DataBoundConstructor;
-import org.kohsuke.stapler.StaplerRequest;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.cli.CLICommand;
-import org.apache.commons.fileupload.FileItem;
-
-import java.io.IOException;
 import java.io.File;
+import java.io.IOException;
 import javax.servlet.ServletException;
+import net.sf.json.JSONObject;
+import org.apache.commons.fileupload.FileItem;
+import org.apache.commons.io.FileUtils;
+import org.jenkinsci.Symbol;
+import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.StaplerRequest;
 
 /**
  * {@link ParameterDefinition} for doing file upload.
@@ -56,7 +57,7 @@ public class FileParameterDefinition extends ParameterDefinition {
         return p;
     }
 
-    @Extension
+    @Extension @Symbol({"file","fileParam"})
     public static class DescriptorImpl extends ParameterDescriptor {
         @Override
         public String getDisplayName() {
@@ -74,32 +75,46 @@ public class FileParameterDefinition extends ParameterDefinition {
         FileItem src;
         try {
             src = req.getFileItem( getName() );
-        } catch (ServletException e) {
+        } catch (ServletException | IOException e) {
             // Not sure what to do here. We might want to raise this
             // but that would involve changing the throws for this call
-            return null;
-        } catch (IOException e) {
-            // ditto above
             return null;
         }
         if ( src == null ) {
             // the requested file parameter wasn't uploaded
             return null;
         }
-        FileParameterValue p = new FileParameterValue(getName(), src);
+        FileParameterValue p = new FileParameterValue(getName(), src, getFileName(src.getName()));
         p.setDescription(getDescription());
         p.setLocation(getName());
         return p;
 	}
 
+    /**
+     * Strip off the path portion if the given path contains it.
+     */
+    private String getFileName(String possiblyPathName) {
+        possiblyPathName = possiblyPathName.substring(possiblyPathName.lastIndexOf('/')+1);
+        possiblyPathName = possiblyPathName.substring(possiblyPathName.lastIndexOf('\\')+1);
+        return possiblyPathName;
+    }
+
+    @SuppressWarnings("deprecation")
     @Override
     public ParameterValue createValue(CLICommand command, String value) throws IOException, InterruptedException {
         // capture the file to the server
-        FilePath src = new FilePath(command.checkChannel(),value);
         File local = File.createTempFile("jenkins","parameter");
-        src.copyTo(new FilePath(local));
+        String name;
+        if (value.isEmpty()) {
+            FileUtils.copyInputStreamToFile(command.stdin, local);
+            name = "stdin";
+        } else {
+            FilePath src = new FilePath(command.checkChannel(), value);
+            src.copyTo(new FilePath(local));
+            name = src.getName();
+        }
 
-        FileParameterValue p = new FileParameterValue(getName(), local, src.getName());
+        FileParameterValue p = new FileParameterValue(getName(), local, name);
         p.setDescription(getDescription());
         p.setLocation(getName());
         return p;

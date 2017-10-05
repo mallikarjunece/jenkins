@@ -30,16 +30,18 @@ import hudson.tasks.BuildWrapper;
 import hudson.util.VariableResolver;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import javax.servlet.ServletException;
 
 import org.apache.commons.fileupload.FileItem;
+import org.apache.commons.fileupload.FileItemHeaders;
 import org.apache.commons.fileupload.disk.DiskFileItem;
+import org.apache.commons.fileupload.util.FileItemHeadersImpl;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.StringUtils;
@@ -66,6 +68,9 @@ public class FileParameterValue extends ParameterValue {
      */
     private final String originalFileName;
 
+    /**
+     * Overrides the location in the build to place this file. Initially set to {@link #getName()}
+     */
     private String location;
 
     @DataBoundConstructor
@@ -81,6 +86,7 @@ public class FileParameterValue extends ParameterValue {
         super(name);
         this.file = file;
         this.originalFileName = originalFileName;
+        setLocation(name);
     }
 
     // post initialization hook
@@ -92,11 +98,16 @@ public class FileParameterValue extends ParameterValue {
         return location;
     }
 
+    @Override
+    public Object getValue() {
+        return file;
+    }
+
     /**
      * Exposes the originalFileName as an environment variable.
      */
     @Override
-    public void buildEnvVars(AbstractBuild<?,?> build, EnvVars env) {
+    public void buildEnvironment(Run<?,?> build, EnvVars env) {
         env.put(name,originalFileName);
     }
 
@@ -129,7 +140,7 @@ public class FileParameterValue extends ParameterValue {
         return new BuildWrapper() {
             @Override
             public Environment setUp(AbstractBuild build, Launcher launcher, BuildListener listener) throws IOException, InterruptedException {
-            	if (!StringUtils.isEmpty(file.getName())) {
+            	if (!StringUtils.isEmpty(location) && !StringUtils.isEmpty(file.getName())) {
             	    listener.getLogger().println("Copying file to "+location);
                     FilePath locationFilePath = build.getWorkspace().child(location);
                     locationFilePath.getParent().mkdirs();
@@ -151,7 +162,8 @@ public class FileParameterValue extends ParameterValue {
 	}
 
 	/**
-	 * In practice this will always be false, since location should be unique.
+	 * Compares file parameters (existing files will be considered as different).
+	 * @since 1.586 Function has been modified in order to avoid <a href="https://jenkins-ci.org/issue/19017">JENKINS-19017</a> issue (wrong merge of builds in the queue).
 	 */
 	@Override
 	public boolean equals(Object obj) {
@@ -162,17 +174,22 @@ public class FileParameterValue extends ParameterValue {
 		if (getClass() != obj.getClass())
 			return false;
 		FileParameterValue other = (FileParameterValue) obj;
-		if (location == null) {
-			if (other.location != null)
-				return false;
-		} else if (!location.equals(other.location))
-			return false;
-		return true;
+		
+		if (location == null && other.location == null) 
+			return true; // Consider null parameters as equal
+
+		//TODO: check fingerprints or checksums to improve the behavior (JENKINS-25211)
+		// Return false even if files are equal
+		return false;
 	}
 
     @Override
     public String toString() {
     	return "(FileParameterValue) " + getName() + "='" + originalFileName + "'";
+    }
+
+    @Override public String getShortDescription() {
+        return name + "=" + originalFileName;
     }
 
     /**
@@ -188,13 +205,16 @@ public class FileParameterValue extends ParameterValue {
             AbstractBuild build = (AbstractBuild)request.findAncestor(AbstractBuild.class).getObject();
             File fileParameter = getLocationUnderBuild(build);
             if (fileParameter.isFile()) {
-                InputStream data = new FileInputStream(fileParameter);
-                long lastModified = fileParameter.lastModified();
-                long contentLength = fileParameter.length();
-                if (request.hasParameter("view")) {
-                    response.serveFile(request, data, lastModified, contentLength, "plain.txt");
-                } else {
-                    response.serveFile(request, data, lastModified, contentLength, originalFileName);
+                try (InputStream data = Files.newInputStream(fileParameter.toPath())) {
+                    long lastModified = fileParameter.lastModified();
+                    long contentLength = fileParameter.length();
+                    if (request.hasParameter("view")) {
+                        response.serveFile(request, data, lastModified, contentLength, "plain.txt");
+                    } else {
+                        response.serveFile(request, data, lastModified, contentLength, originalFileName);
+                    }
+                } catch (InvalidPathException e) {
+                    throw new IOException(e);
                 }
             }
         }
@@ -224,7 +244,11 @@ public class FileParameterValue extends ParameterValue {
         }
 
         public InputStream getInputStream() throws IOException {
-            return new FileInputStream(file);
+            try {
+                return Files.newInputStream(file.toPath());
+            } catch (InvalidPathException e) {
+                throw new IOException(e);
+            }
         }
 
         public String getContentType() {
@@ -245,8 +269,10 @@ public class FileParameterValue extends ParameterValue {
 
         public byte[] get() {
             try {
-                return IOUtils.toByteArray(new FileInputStream(file));
-            } catch (IOException e) {
+                try (InputStream inputStream = Files.newInputStream(file.toPath())) {
+                    return IOUtils.toByteArray(inputStream);
+                }
+            } catch (IOException | InvalidPathException e) {
                 throw new Error(e);
             }
         }
@@ -281,8 +307,22 @@ public class FileParameterValue extends ParameterValue {
         public void setFormField(boolean state) {
         }
 
+        @Deprecated
         public OutputStream getOutputStream() throws IOException {
-            return new FileOutputStream(file);
+            try {
+                return Files.newOutputStream(file.toPath());
+            } catch (InvalidPathException e) {
+                throw new IOException(e);
+            }
+        }
+
+        @Override
+        public FileItemHeaders getHeaders() {
+            return new FileItemHeadersImpl();
+        }
+
+        @Override
+        public void setHeaders(FileItemHeaders headers) {
         }
     }
 }

@@ -25,36 +25,11 @@
 package hudson.model.queue;
 
 import hudson.model.Queue;
-import hudson.model.Queue.Task;
-
-import java.util.Collection;
-import java.util.Collections;
 
 /**
- * Abstract base class for {@link Queue.Task} to protect plugins
- * from new additions to the interface.
- *
- * @author Kohsuke Kawaguchi
- * @since 1.360
+ * @deprecated implement {@link hudson.model.Queue.Task} directly
  */
+@Deprecated
 public abstract class AbstractQueueTask implements Queue.Task {
-    public Collection<? extends SubTask> getSubTasks() {
-        return Collections.singleton(this);
-    }
 
-    public final Task getOwnerTask() {
-        return this;
-    }
-
-    public boolean isConcurrentBuild() {
-        return false;
-    }
-
-    public CauseOfBlockage getCauseOfBlockage() {
-        return null;
-    }
-
-    public Object getSameNodeConstraint() {
-        return null;
-    }
 }

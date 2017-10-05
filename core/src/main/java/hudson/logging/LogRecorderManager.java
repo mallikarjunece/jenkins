@@ -32,12 +32,15 @@ import jenkins.model.Jenkins;
 import hudson.model.RSS;
 import hudson.util.CopyOnWriteMap;
 import jenkins.model.JenkinsLocationConfiguration;
+import jenkins.model.ModelObjectWithChildren;
+import jenkins.model.ModelObjectWithContextMenu.ContextMenu;
 import org.apache.commons.io.filefilter.WildcardFileFilter;
 import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.StaplerResponse;
 import org.kohsuke.stapler.HttpResponse;
 import org.kohsuke.stapler.HttpRedirect;
+import org.kohsuke.stapler.interceptor.RequirePOST;
 
 import javax.servlet.ServletException;
 import java.io.File;
@@ -58,9 +61,9 @@ import java.util.logging.Logger;
  *
  * @author Kohsuke Kawaguchi
  */
-public class LogRecorderManager extends AbstractModelObject {
+public class LogRecorderManager extends AbstractModelObject implements ModelObjectWithChildren {
     /**
-     * {@link LogRecorder}s.
+     * {@link LogRecorder}s keyed by their {@linkplain LogRecorder#name name}.
      */
     public transient final Map<String,LogRecorder> logRecorders = new CopyOnWriteMap.Tree<String,LogRecorder>();
 
@@ -80,12 +83,16 @@ public class LogRecorderManager extends AbstractModelObject {
         return logRecorders.get(token);
     }
 
+    static File configDir() {
+        return new File(Jenkins.getInstance().getRootDir(), "log");
+    }
+
     /**
      * Loads the configuration from disk.
      */
     public void load() throws IOException {
         logRecorders.clear();
-        File dir = new File(Jenkins.getInstance().getRootDir(), "log");
+        File dir = configDir();
         File[] files = dir.listFiles((FileFilter)new WildcardFileFilter("*.xml"));
         if(files==null)     return;
         for (File child : files) {
@@ -100,6 +107,7 @@ public class LogRecorderManager extends AbstractModelObject {
     /**
      * Creates a new log recorder.
      */
+    @RequirePOST
     public HttpResponse doNewLogRecorder(@QueryParameter String name) {
         Jenkins.checkGoodName(name);
         
@@ -109,10 +117,20 @@ public class LogRecorderManager extends AbstractModelObject {
         return new HttpRedirect(name+"/configure");
     }
 
+    public ContextMenu doChildrenContextMenu(StaplerRequest request, StaplerResponse response) throws Exception {
+        ContextMenu menu = new ContextMenu();
+        menu.add("all","All Jenkins Logs");
+        for (LogRecorder lr : logRecorders.values()) {
+            menu.add(lr.getSearchUrl(), lr.getDisplayName());
+        }
+        return menu;
+    }
+
     /**
      * Configure the logging level.
      */
-    @edu.umd.cs.findbugs.annotations.SuppressWarnings("LG_LOST_LOGGER_DUE_TO_WEAK_REFERENCE")
+    @edu.umd.cs.findbugs.annotations.SuppressFBWarnings("LG_LOST_LOGGER_DUE_TO_WEAK_REFERENCE")
+    @RequirePOST
     public HttpResponse doConfigLogger(@QueryParameter String name, @QueryParameter String level) {
         Jenkins.getInstance().checkPermission(Jenkins.ADMINISTER);
         Level lv;

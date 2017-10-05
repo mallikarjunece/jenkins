@@ -3,6 +3,7 @@ package hudson.console;
 import hudson.Extension;
 import hudson.MarkupText;
 import hudson.MarkupText.SubText;
+import org.jenkinsci.Symbol;
 
 import java.util.regex.Pattern;
 
@@ -11,7 +12,7 @@ import java.util.regex.Pattern;
  *
  * @author Kohsuke Kawaguchi
  */
-@Extension
+@Extension @Symbol("url")
 public class UrlAnnotator extends ConsoleAnnotatorFactory<Object> {
     @Override
     public ConsoleAnnotator newInstance(Object context) {
@@ -40,7 +41,7 @@ public class UrlAnnotator extends ConsoleAnnotatorFactory<Object> {
          * In addition, the last character shouldn't be ',' ':', '"', etc, as often those things show up right next
          * to URL in plain text (e.g., test="http://www.example.com/")
          */
-        private static final Pattern URL = Pattern.compile("\\b(http|https|ftp)://[^\\s<>]+[^\\s<>,\\.:\"'()\\[\\]=]");
+        private static final Pattern URL = Pattern.compile("\\b(http|https|file|ftp)://[^\\s<>]+[^\\s<>,\\.:\"'()\\[\\]=]");
 
         private static final String OPEN = "'\"()[]<>";
         private static final String CLOSE= "'\")(][><";

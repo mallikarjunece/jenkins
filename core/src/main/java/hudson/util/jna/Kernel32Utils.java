@@ -27,6 +27,7 @@ import java.io.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import com.sun.jna.Memory;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
 import com.sun.jna.ptr.IntByReference;
@@ -80,6 +81,10 @@ public class Kernel32Utils {
      * @param target
      *      If relative, resolved against the location of the symlink.
      *      If absolute, it's absolute.
+     * @throws UnsatisfiedLinkError
+     *      If the function is not exported by kernel32.
+     *      See http://msdn.microsoft.com/en-us/library/windows/desktop/aa363866(v=vs.85).aspx
+     *      for compatibility info.
      */
     public static void createSymbolicLink(File symlink, String target, boolean dirLink) throws IOException {
         if (!Kernel32.INSTANCE.CreateSymbolicLinkW(
@@ -91,6 +96,15 @@ public class Kernel32Utils {
 
     public static boolean isJunctionOrSymlink(File file) throws IOException {
         return (file.exists() && (Kernel32.FILE_ATTRIBUTE_REPARSE_POINT & getWin32FileAttributes(file)) != 0);
+    }
+
+    public static File getTempDir() {
+        Memory buf = new Memory(1024);
+        if (Kernel32.INSTANCE.GetTempPathW(512,buf)!=0) {// the first arg is number of wchar
+            return new File(buf.getString(0, true));
+        } else {
+            return null;
+        }
     }
 
     /*package*/ static Kernel32 load() {

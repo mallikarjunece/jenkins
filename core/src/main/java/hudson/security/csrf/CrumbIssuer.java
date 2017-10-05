@@ -37,12 +37,15 @@ import org.kohsuke.stapler.StaplerResponse;
  * forged by a third party.
  *
  * @author dty
- * @see http://en.wikipedia.org/wiki/XSRF
+ * @see <a href="http://en.wikipedia.org/wiki/XSRF">Wikipedia: Cross site request forgery</a>
  */
 @ExportedBean
 public abstract class CrumbIssuer implements Describable<CrumbIssuer>, ExtensionPoint {
 
     private static final String CRUMB_ATTRIBUTE = CrumbIssuer.class.getName() + "_crumb";
+
+    @Restricted(NoExternalUse.class)
+    public static final String DEFAULT_CRUMB_NAME = "Jenkins-Crumb";
 
     /**
      * Get the name of the request parameter the crumb will be stored in. Exposed
@@ -56,7 +59,6 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
     /**
      * Get a crumb value based on user specific information in the current request.
      * Intended for use only by the remote API.
-     * @return
      */
     @Exported
     public String getCrumb() {
@@ -66,7 +68,6 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
     /**
      * Get a crumb value based on user specific information in the request.
      * @param request
-     * @return
      */
     public String getCrumb(ServletRequest request) {
         String crumb = null;
@@ -98,7 +99,6 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
      *
      * @param request
      * @param salt
-     * @return
      */
     protected abstract String issueCrumb(ServletRequest request, String salt);
 
@@ -108,7 +108,6 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
      * defined by the current configuration.
      *
      * @param request
-     * @return
      */
     public boolean validateCrumb(ServletRequest request) {
         CrumbIssuerDescriptor<CrumbIssuer> desc = getDescriptor();
@@ -125,7 +124,6 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
      *
      * @param request
      * @param parser
-     * @return
      */
     public boolean validateCrumb(ServletRequest request, MultipartFormDataParser parser) {
         CrumbIssuerDescriptor<CrumbIssuer> desc = getDescriptor();
@@ -141,7 +139,6 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
      * @param request
      * @param salt
      * @param crumb The previously generated crumb to validate against information in the current request
-     * @return
      */
     public abstract boolean validateCrumb(ServletRequest request, String salt, String crumb);
 
@@ -196,6 +193,7 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
         }
 
         @Override public void doXml(StaplerRequest req, StaplerResponse rsp, @QueryParameter String xpath, @QueryParameter String wrapper, @QueryParameter String tree, @QueryParameter int depth) throws IOException, ServletException {
+            setHeaders(rsp);
             String text;
             CrumbIssuer ci = (CrumbIssuer) bean;
             if ("/*/crumbRequestField/text()".equals(xpath)) { // old FullDuplexHttpStream
@@ -205,7 +203,7 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
             } else if ("concat(//crumbRequestField,\":\",//crumb)".equals(xpath)) { // new FullDuplexHttpStream; Main
                 text = ci.getCrumbRequestField() + ':' + ci.getCrumb();
             } else if ("concat(//crumbRequestField,'=',//crumb)".equals(xpath)) { // NetBeans
-                if (ci.getCrumbRequestField().startsWith(".")) {
+                if (ci.getCrumbRequestField().startsWith(".") || ci.getCrumbRequestField().contains("-")) {
                     text = ci.getCrumbRequestField() + '=' + ci.getCrumb();
                 } else {
                     text = null;
@@ -214,12 +212,9 @@ public abstract class CrumbIssuer implements Describable<CrumbIssuer>, Extension
                 text = null;
             }
             if (text != null) {
-                OutputStream o = rsp.getCompressedOutputStream(req);
-                try {
+                try (OutputStream o = rsp.getCompressedOutputStream(req)) {
                     rsp.setContentType("text/plain;charset=UTF-8");
                     o.write(text.getBytes("UTF-8"));
-                } finally {
-                    o.close();
                 }
             } else {
                 super.doXml(req, rsp, xpath, wrapper, tree, depth);

@@ -1,21 +1,30 @@
 package hudson.model.queue;
 
 import hudson.console.ModelHyperlinkNote;
+import hudson.model.Computer;
 import hudson.model.Queue.Task;
 import hudson.model.Node;
 import hudson.model.Messages;
 import hudson.model.Label;
 import hudson.model.TaskListener;
 import hudson.slaves.Cloud;
+import javax.annotation.Nonnull;
 import org.jvnet.localizer.Localizable;
 
 /**
- * If a {@link Task} execution is blocked in the queue, this object represents why.
+ * If something is blocked/vetoed, this object represents why.
+ *
+ * <p>
+ * Originally, this is added for {@link Task} stuck in the queue, but since then the use of this
+ * has expanded beyond queues.
  *
  * <h2>View</h2>
- * <tt>summary.jelly</tt> should do one-line HTML rendering to be used while rendering
- * "build history" widget, next to the blocking build. By default it simply renders
- * {@link #getShortDescription()} text.
+ * <tt>summary.jelly</tt> should do one-line HTML rendering to be used showing the cause
+ * to the user. By default it simply renders {@link #getShortDescription()} text.
+ *
+ * <p>
+ * For queues, this is used while rendering the "build history" widget.
+ *
  *
  * @since 1.330
  */
@@ -35,12 +44,18 @@ public abstract class CauseOfBlockage {
     /**
      * Obtains a simple implementation backed by {@link Localizable}.
      */
-    public static CauseOfBlockage fromMessage(final Localizable l) {
+    public static CauseOfBlockage fromMessage(@Nonnull final Localizable l) {
+        l.getKey(); // null check
         return new CauseOfBlockage() {
+            @Override
             public String getShortDescription() {
                 return l.toString();
             }
         };
+    }
+
+    @Override public String toString() {
+        return getShortDescription();
     }
 
     /**
@@ -81,7 +96,8 @@ public abstract class CauseOfBlockage {
         }
 
         public String getShortDescription() {
-            return Messages.Queue_NodeOffline(node.getDisplayName());
+            String name = (node.toComputer() != null) ? node.toComputer().getDisplayName() : node.getDisplayName();
+            return Messages.Queue_NodeOffline(name);
         }
         
         @Override
@@ -89,6 +105,33 @@ public abstract class CauseOfBlockage {
             listener.getLogger().println(
                 Messages.Queue_NodeOffline(ModelHyperlinkNote.encodeTo(node)));
         }
+    }
+
+    /**
+     * Build is blocked because a node (or its retention strategy) is not accepting tasks.
+     * @since 2.37
+     */
+    public static final class BecauseNodeIsNotAcceptingTasks extends CauseOfBlockage implements NeedsMoreExecutor {
+
+        public final Node node;
+
+        public BecauseNodeIsNotAcceptingTasks(Node node) {
+            this.node = node;
+        }
+
+        @Override
+        public String getShortDescription() {
+            Computer computer = node.toComputer();
+            String name = computer != null ? computer.getDisplayName() : node.getDisplayName();
+            return Messages.Node_BecauseNodeIsNotAcceptingTasks(name);
+        }
+
+        @Override
+        public void print(TaskListener listener) {
+            listener.getLogger().println(
+                Messages.Node_BecauseNodeIsNotAcceptingTasks(ModelHyperlinkNote.encodeTo(node)));
+        }
+
     }
 
     /**
@@ -102,7 +145,11 @@ public abstract class CauseOfBlockage {
         }
 
         public String getShortDescription() {
-            return Messages.Queue_AllNodesOffline(label.getName());
+            if (label.isEmpty()) {
+                return Messages.Queue_LabelHasNoNodes(label.getName());
+            } else {
+                return Messages.Queue_AllNodesOffline(label.getName());
+            }
         }
     }
 
@@ -117,7 +164,8 @@ public abstract class CauseOfBlockage {
         }
 
         public String getShortDescription() {
-            return Messages.Queue_WaitingForNextAvailableExecutorOn(node.getNodeName());
+            String name = (node.toComputer() != null) ? node.toComputer().getDisplayName() : node.getDisplayName();
+            return Messages.Queue_WaitingForNextAvailableExecutorOn(name);
         }
         
         @Override

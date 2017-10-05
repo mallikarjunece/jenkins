@@ -16,7 +16,7 @@ public abstract class WorkspaceListener implements ExtensionPoint {
 
     /**
      * Called before a build uses a workspace. IE, before any SCM checkout.
-     * @param r
+     * @param b
      * @param workspace
      * @param listener 
      */
@@ -28,7 +28,7 @@ public abstract class WorkspaceListener implements ExtensionPoint {
      * All registered {@link WorkspaceListener}s.
      */
     public static ExtensionList<WorkspaceListener> all() {
-        return Hudson.getInstance().getExtensionList(WorkspaceListener.class);
+        return ExtensionList.lookup(WorkspaceListener.class);
     }
 
 }

@@ -60,7 +60,7 @@ import java.util.Comparator;
  *
  * @author Kohsuke Kawaguchi
  */
-public abstract class Publisher extends BuildStepCompatibilityLayer implements BuildStep, Describable<Publisher> {
+public abstract class Publisher extends BuildStepCompatibilityLayer implements Describable<Publisher> {
     /**
      * @deprecated
      *      Don't extend from {@link Publisher} directly. Instead, choose {@link Recorder} or {@link Notifier}
@@ -101,7 +101,7 @@ public abstract class Publisher extends BuildStepCompatibilityLayer implements B
      * to include their execution time in the total build time.
      *
      * <p>
-     * So normally, that is the preferrable behavior, but in a few cases
+     * So normally, that is the preferable behavior, but in a few cases
      * this is problematic. One of such cases is when a publisher needs to
      * trigger other builds, which in turn need to see this build as a
      * completed build. Those plugins that need to do this can return true
@@ -112,7 +112,6 @@ public abstract class Publisher extends BuildStepCompatibilityLayer implements B
      * When {@link Publisher} behaves this way, note that they can no longer
      * change the build status anymore.
      *
-     * @author Kohsuke Kawaguchi
      * @since 1.153
      */
     public boolean needsToRunAfterFinalized() {
@@ -126,7 +125,7 @@ public abstract class Publisher extends BuildStepCompatibilityLayer implements B
     /**
      * {@link Publisher} has a special sort semantics that requires a subtype.
      *
-     * @see DescriptorExtensionList#createDescriptorList(hudson.model.Hudson, Class
+     * @see DescriptorExtensionList#createDescriptorList(hudson.model.Hudson, Class)
      */
     public static final class DescriptorExtensionListImpl extends DescriptorExtensionList<Publisher,Descriptor<Publisher>>
             implements Comparator<ExtensionComponent<Descriptor<Publisher>>> {

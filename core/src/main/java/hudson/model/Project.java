@@ -26,6 +26,7 @@ package hudson.model;
 
 import hudson.Util;
 import hudson.model.Descriptor.FormException;
+import hudson.scm.SCM;
 import hudson.tasks.BuildStep;
 import hudson.tasks.BuildWrapper;
 import hudson.tasks.BuildWrappers;
@@ -35,6 +36,7 @@ import hudson.tasks.Publisher;
 import hudson.tasks.Maven;
 import hudson.tasks.Maven.ProjectWithMaven;
 import hudson.tasks.Maven.MavenInstallation;
+import hudson.triggers.SCMTrigger;
 import hudson.triggers.Trigger;
 import hudson.util.DescribableList;
 import net.sf.json.JSONObject;
@@ -43,10 +45,16 @@ import org.kohsuke.stapler.StaplerResponse;
 
 import javax.servlet.ServletException;
 import java.io.IOException;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import jenkins.triggers.SCMTriggerItem;
 
 /**
  * Buildable software project.
@@ -54,22 +62,28 @@ import java.util.Set;
  * @author Kohsuke Kawaguchi
  */
 public abstract class Project<P extends Project<P,B>,B extends Build<P,B>>
-    extends AbstractProject<P,B> implements SCMedItem, Saveable, ProjectWithMaven, BuildableItemWithBuildWrappers {
+    extends AbstractProject<P,B> implements SCMTriggerItem, Saveable, ProjectWithMaven, BuildableItemWithBuildWrappers {
 
     /**
      * List of active {@link Builder}s configured for this project.
      */
-    private DescribableList<Builder,Descriptor<Builder>> builders;
+    private volatile DescribableList<Builder,Descriptor<Builder>> builders;
+    private static final AtomicReferenceFieldUpdater<Project,DescribableList> buildersSetter
+            = AtomicReferenceFieldUpdater.newUpdater(Project.class,DescribableList.class,"builders");
 
     /**
      * List of active {@link Publisher}s configured for this project.
      */
-    private DescribableList<Publisher,Descriptor<Publisher>> publishers;
+    private volatile DescribableList<Publisher,Descriptor<Publisher>> publishers;
+    private static final AtomicReferenceFieldUpdater<Project,DescribableList> publishersSetter
+            = AtomicReferenceFieldUpdater.newUpdater(Project.class,DescribableList.class,"publishers");
 
     /**
      * List of active {@link BuildWrapper}s configured for this project.
      */
-    private DescribableList<BuildWrapper,Descriptor<BuildWrapper>> buildWrappers;
+    private volatile DescribableList<BuildWrapper,Descriptor<BuildWrapper>> buildWrappers;
+    private static final AtomicReferenceFieldUpdater<Project,DescribableList> buildWrappersSetter
+            = AtomicReferenceFieldUpdater.newUpdater(Project.class,DescribableList.class,"buildWrappers");
 
     /**
      * Creates a new project.
@@ -90,6 +104,18 @@ public abstract class Project<P extends Project<P,B>,B extends Build<P,B>>
         return this;
     }
 
+    @Override public Item asItem() {
+        return this;
+    }
+
+    @Override public SCMTrigger getSCMTrigger() {
+        return getTrigger(SCMTrigger.class);
+    }
+
+    @Override public Collection<? extends SCM> getSCMs() {
+        return SCMTriggerItem.SCMTriggerItems.resolveMultiScmIfConfigured(getScm());
+    }
+
     public List<Builder> getBuilders() {
         return getBuildersList().toList();
     }
@@ -99,20 +125,21 @@ public abstract class Project<P extends Project<P,B>,B extends Build<P,B>>
      *      We will be soon removing the restriction that only one instance of publisher is allowed per type.
      *      Use {@link #getPublishersList()} instead.
      */
+    @Deprecated
     public Map<Descriptor<Publisher>,Publisher> getPublishers() {
         return getPublishersList().toMap();
     }
 
-    public synchronized DescribableList<Builder,Descriptor<Builder>> getBuildersList() {
+    public DescribableList<Builder,Descriptor<Builder>> getBuildersList() {
         if (builders == null) {
-            builders = new DescribableList<Builder,Descriptor<Builder>>(this);
+            buildersSetter.compareAndSet(this,null,new DescribableList<Builder,Descriptor<Builder>>(this));
         }
         return builders;
     }
     
-    public synchronized DescribableList<Publisher,Descriptor<Publisher>> getPublishersList() {
+    public DescribableList<Publisher,Descriptor<Publisher>> getPublishersList() {
         if (publishers == null) {
-            publishers = new DescribableList<Publisher,Descriptor<Publisher>>(this);
+            publishersSetter.compareAndSet(this,null,new DescribableList<Publisher,Descriptor<Publisher>>(this));
         }
         return publishers;
     }
@@ -121,9 +148,9 @@ public abstract class Project<P extends Project<P,B>,B extends Build<P,B>>
         return getBuildWrappersList().toMap();
     }
 
-    public synchronized DescribableList<BuildWrapper, Descriptor<BuildWrapper>> getBuildWrappersList() {
+    public DescribableList<BuildWrapper, Descriptor<BuildWrapper>> getBuildWrappersList() {
         if (buildWrappers == null) {
-            buildWrappers = new DescribableList<BuildWrapper,Descriptor<BuildWrapper>>(this);
+            buildWrappersSetter.compareAndSet(this,null,new DescribableList<BuildWrapper,Descriptor<BuildWrapper>>(this));
         }
         return buildWrappers;
     }
@@ -146,6 +173,7 @@ public abstract class Project<P extends Project<P,B>,B extends Build<P,B>>
      * @deprecated as of 1.290
      *      Use {@code getPublishersList().add(x)}
      */
+    @Deprecated
     public void addPublisher(Publisher buildStep) throws IOException {
         getPublishersList().add(buildStep);
     }
@@ -156,6 +184,7 @@ public abstract class Project<P extends Project<P,B>,B extends Build<P,B>>
      * @deprecated as of 1.290
      *      Use {@code getPublishersList().remove(x)}
      */
+    @Deprecated
     public void removePublisher(Descriptor<Publisher> descriptor) throws IOException {
         getPublishersList().remove(descriptor);
     }
@@ -168,7 +197,8 @@ public abstract class Project<P extends Project<P,B>,B extends Build<P,B>>
         return null;
     }
 
-    protected void buildDependencyGraph(DependencyGraph graph) {
+    @Override protected void buildDependencyGraph(DependencyGraph graph) {
+        super.buildDependencyGraph(graph);
         getPublishersList().buildDependencyGraph(this,graph);
         getBuildersList().buildDependencyGraph(this,graph);
         getBuildWrappersList().buildDependencyGraph(this,graph);
@@ -205,15 +235,37 @@ public abstract class Project<P extends Project<P,B>,B extends Build<P,B>>
     protected List<Action> createTransientActions() {
         List<Action> r = super.createTransientActions();
 
-        for (BuildStep step : getBuildersList())
-            r.addAll(step.getProjectActions(this));
-        for (BuildStep step : getPublishersList())
-            r.addAll(step.getProjectActions(this));
-        for (BuildWrapper step : getBuildWrappers().values())
-            r.addAll(step.getProjectActions(this));
-        for (Trigger trigger : getTriggers().values())
-            r.addAll(trigger.getProjectActions());
+        for (BuildStep step : getBuildersList()) {
+            try {
+                r.addAll(step.getProjectActions(this));
+            } catch (Exception e) {
+                LOGGER.log(Level.SEVERE, "Error loading build step.", e);
+            }
+        }
+        for (BuildStep step : getPublishersList()) {
+            try {
+                r.addAll(step.getProjectActions(this));
+            } catch (Exception e) {
+                LOGGER.log(Level.SEVERE, "Error loading publisher.", e);
+            }
+        }
+        for (BuildWrapper step : getBuildWrappers().values()) {
+            try {
+                r.addAll(step.getProjectActions(this));
+            } catch (Exception e) {
+                LOGGER.log(Level.SEVERE, "Error loading build wrapper.", e);
+            }
+        }
+        for (Trigger trigger : triggers()) {
+            try {
+                r.addAll(trigger.getProjectActions());
+            } catch (Exception e) {
+                LOGGER.log(Level.SEVERE, "Error loading trigger.", e);
+            }
+        }
 
         return r;
     }
+
+    private static final Logger LOGGER = Logger.getLogger(Project.class.getName());
 }
